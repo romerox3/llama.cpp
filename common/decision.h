@@ -47,6 +47,7 @@ struct common_decision_question {
 
 struct common_decision_request {
     std::string state;
+    std::string model = "kev-latest";
     std::vector<common_decision_question> questions;
 };
 

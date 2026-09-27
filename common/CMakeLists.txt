@@ -70,6 +70,8 @@ add_library(${TARGET}
     chat.h
     common.cpp
     common.h
+    decision-render.cpp
+    decision-render.h
     decision.cpp
     decision.h
     decision-answers.cpp

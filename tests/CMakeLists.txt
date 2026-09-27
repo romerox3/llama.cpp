@@ -159,6 +159,13 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     llama_build_and_test(test-unicode.cpp)
     llama_build_and_test(test-sampling.cpp)
     llama_build_and_test(test-reasoning-budget.cpp)
+    llama_build_and_test(test-kev-render.cpp
+        ARGS
+            ${PROJECT_SOURCE_DIR}/tests/kev/fixtures/render.jsonl
+            ${PROJECT_SOURCE_DIR}/tests/kev/fixtures/option_text.jsonl
+            ${PROJECT_SOURCE_DIR}/tests/kev/fixtures/requests.jsonl
+            ${PROJECT_SOURCE_DIR}/tests/kev/fixtures/date_facts.jsonl
+            ${PROJECT_SOURCE_DIR}/tests/kev/fixtures/with_date_facts.jsonl)
     llama_build_and_test(test-grammar-parser.cpp)
     llama_build_and_test(test-grammar-integration.cpp)
     llama_build_and_test(test-llama-grammar.cpp)

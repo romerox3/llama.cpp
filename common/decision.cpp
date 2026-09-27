@@ -56,59 +56,9 @@ static llama_token delimiter(const llama_vocab * vocab, const char * text) {
     return tokens[0];
 }
 
-static std::string trim_left(const std::string & value) {
-    const size_t first = value.find_first_not_of(" \t\r\n");
-    return first == std::string::npos ? "" : value.substr(first);
-}
-
-static std::string render(const ordered_json & value, int indent = 0) {
-    const std::string pad(static_cast<size_t>(indent) * 2, ' ');
-    if (value.is_null()) {
-        return "";
-    }
-    if (value.is_string()) {
-        return value.get<std::string>();
-    }
-    if (value.is_boolean()) {
-        return value.get<bool>() ? "True" : "False";
-    }
-    if (value.is_number()) {
-        return value.dump();
-    }
-    if (value.is_array()) {
-        std::string out;
-        for (size_t i = 0; i < value.size(); ++i) {
-            if (i != 0) {
-                out += '\n';
-            }
-            out += pad + "- " + trim_left(render(value[i], indent + 1));
-        }
-        return out;
-    }
-    std::string out;
-    for (auto it = value.begin(); it != value.end(); ++it) {
-        if (!out.empty()) {
-            out += '\n';
-        }
-        if (it.value().is_object() || it.value().is_array()) {
-            out += pad + it.key() + ":\n" + render(it.value(), indent + 1);
-        } else {
-            out += pad + it.key() + ": " + render(it.value());
-        }
-    }
-    return out;
-}
-
 static std::string escape_user(const std::string & text) {
     static const std::regex special(R"(<\|([A-Za-z0-9_]+)\|>)");
     return std::regex_replace(text, special, "<\xC2\xA6$1\xC2\xA6>");
-}
-
-static std::string option_text(const std::string & name, const ordered_json & description) {
-    if (description.is_null() || (description.is_string() && description.get<std::string>().empty())) {
-        return name;
-    }
-    return name + ": " + render(description);
 }
 
 static bool read_tensor(
@@ -359,71 +309,6 @@ bool common_decision_load_json(
         head.tok_opt_start = delimiter(vocab, "<|box_start|>");
         head.tok_opt_end = delimiter(vocab, "<|box_end|>");
         head.tok_decide = delimiter(vocab, "<|fim_suffix|>");
-        return true;
-    } catch (const std::exception & e) {
-        return fail(err, e.what());
-    }
-}
-
-bool common_decision_parse(
-        const ordered_json & body,
-        common_decision_request & req,
-        std::string & err) {
-    try {
-        if (!body.is_object() || !body.contains("state")) {
-            return fail(err, "state is required");
-        }
-        if (!body.contains("questions") || !body.at("questions").is_object() || body.at("questions").empty()) {
-            return fail(err, "questions must be a non-empty object");
-        }
-        req = common_decision_request();
-        req.state = render(body.at("state"));
-        for (auto it = body.at("questions").begin(); it != body.at("questions").end(); ++it) {
-            const auto & value = it.value();
-            if (!value.is_object() || !value.contains("type") || !value.at("type").is_string()) {
-                return fail(err, "question " + it.key() + " has an invalid type");
-            }
-            common_decision_question question;
-            question.id = it.key();
-            question.type = value.at("type").get<std::string>();
-            question.instructions = render(value.contains("instructions") ? value.at("instructions") : ordered_json(nullptr));
-            if (question.type == "noul") {
-                if (value.contains("criteria") && !value.at("criteria").is_null() && !value.at("criteria").is_object()) {
-                    return fail(err, "noul criteria must be an object");
-                }
-                const auto criteria = value.value("criteria", ordered_json::object());
-                question.keys = {"false", "true"};
-                question.options = {
-                    option_text("no", criteria.contains("false") ? criteria.at("false") : ordered_json(nullptr)),
-                    option_text("yes", criteria.contains("true") ? criteria.at("true") : ordered_json(nullptr)),
-                };
-            } else if (question.type == "choice") {
-                if (!value.contains("criteria") || !value.at("criteria").is_object() || value.at("criteria").empty()) {
-                    return fail(err, "choice criteria must be a non-empty object");
-                }
-                if (value.at("criteria").size() > 255) {
-                    return fail(err, "choice criteria has too many options");
-                }
-                for (auto criterion = value.at("criteria").begin(); criterion != value.at("criteria").end(); ++criterion) {
-                    question.keys.push_back(criterion.key());
-                    question.options.push_back(option_text(criterion.key(), criterion.value()));
-                }
-            } else if (question.type == "score") {
-                if (!value.contains("criteria") || !value.at("criteria").is_array() || value.at("criteria").empty()) {
-                    return fail(err, "score criteria must be a non-empty array");
-                }
-                if (value.at("criteria").size() > 255) {
-                    return fail(err, "score criteria has too many levels");
-                }
-                for (size_t i = 0; i < value.at("criteria").size(); ++i) {
-                    question.keys.push_back(std::to_string(i));
-                    question.options.push_back(render(value.at("criteria").at(i)));
-                }
-            } else {
-                return fail(err, "question " + it.key() + " has an invalid type");
-            }
-            req.questions.push_back(std::move(question));
-        }
         return true;
     } catch (const std::exception & e) {
         return fail(err, e.what());
