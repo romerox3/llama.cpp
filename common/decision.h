@@ -39,6 +39,18 @@ bool common_decision_load_json(
         common_decision_head & head,
         std::string & err);
 
+// probabilities for one question, factorized: v = k_w^T q and c = k_b . q are built once per question
+std::vector<float> common_decision_probabilities(
+        const common_decision_head & head,
+        const float * decide,
+        const std::vector<const float *> & options);
+
+// per option projection, kept as the reference path for tests that validate the fast one
+std::vector<float> common_decision_probabilities_reference(
+        const common_decision_head & head,
+        const float * decide,
+        const std::vector<const float *> & options);
+
 struct common_decision_question {
     std::string id;
     std::string type;
@@ -64,6 +76,7 @@ struct common_decision_result {
     std::vector<int32_t> n_branch_tokens;
     double t_state_ms = 0;
     double t_branches_ms = 0;
+    double t_head_ms = 0;
 };
 
 bool common_decision_run(

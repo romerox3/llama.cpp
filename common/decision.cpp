@@ -119,7 +119,85 @@ static std::vector<float> project(
     return out;
 }
 
-static std::vector<float> probabilities(
+static void batch_add(
+        llama_batch & batch,
+        int32_t index,
+        llama_token token,
+        llama_pos position,
+        llama_seq_id sequence) {
+    batch.token[index] = token;
+    batch.pos[index] = position;
+    batch.n_seq_id[index] = 1;
+    batch.seq_id[index][0] = sequence;
+    batch.logits[index] = 1;
+}
+
+static void clear_sequences(llama_memory_t memory, uint32_t n_seq_max) {
+    for (uint32_t i = 0; i < n_seq_max; ++i) {
+        llama_memory_seq_rm(memory, static_cast<llama_seq_id>(i), -1, -1);
+    }
+}
+
+}
+
+// dot product with 8 partial sums so the loop vectorizes without reassociation
+static float dot8(const float * a, const float * b, int32_t n) {
+    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    int32_t j = 0;
+    for (; j + 8 <= n; j += 8) {
+        for (int32_t k = 0; k < 8; ++k) {
+            acc[k] += a[j + k] * b[j + k];
+        }
+    }
+    float sum = 0;
+    for (int32_t k = 0; k < 8; ++k) {
+        sum += acc[k];
+    }
+    for (; j < n; ++j) {
+        sum += a[j] * b[j];
+    }
+    return sum;
+}
+
+std::vector<float> common_decision_probabilities(
+        const common_decision_head & head,
+        const float * decide,
+        const std::vector<const float *> & options) {
+    // query = q_w decide + q_b, with partial sums so the loop vectorizes without reassociation
+    std::vector<float> query(head.head_dim);
+    for (int32_t i = 0; i < head.head_dim; ++i) {
+        query[i] = head.q_b[i] + dot8(head.q_w.data() + static_cast<size_t>(i) * head.n_embd, decide, head.n_embd);
+    }
+    // logit_j = (option_j . (k_w^T q) + k_b . q) * scale: one pass over k_w per question, not per option
+    std::vector<float> key_q(head.n_embd, 0.0f);
+    float bias_q = 0.0f;
+    for (int32_t i = 0; i < head.head_dim; ++i) {
+        const float qi = query[i];
+        bias_q += head.k_b[i] * qi;
+        const float * row = head.k_w.data() + static_cast<size_t>(i) * head.n_embd;
+        for (int32_t j = 0; j < head.n_embd; ++j) {
+            key_q[j] += row[j] * qi;
+        }
+    }
+    std::vector<float> logits;
+    logits.reserve(options.size());
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head.head_dim)) / head.temperature;
+    for (const float * option : options) {
+        logits.push_back((bias_q + dot8(option, key_q.data(), head.n_embd)) * scale);
+    }
+    const float max_logit = *std::max_element(logits.begin(), logits.end());
+    float sum = 0;
+    for (float & logit : logits) {
+        logit = std::exp(logit - max_logit);
+        sum += logit;
+    }
+    for (float & logit : logits) {
+        logit /= sum;
+    }
+    return logits;
+}
+
+std::vector<float> common_decision_probabilities_reference(
         const common_decision_head & head,
         const float * decide,
         const std::vector<const float *> & options) {
@@ -145,27 +223,6 @@ static std::vector<float> probabilities(
         logit /= sum;
     }
     return logits;
-}
-
-static void batch_add(
-        llama_batch & batch,
-        int32_t index,
-        llama_token token,
-        llama_pos position,
-        llama_seq_id sequence) {
-    batch.token[index] = token;
-    batch.pos[index] = position;
-    batch.n_seq_id[index] = 1;
-    batch.seq_id[index][0] = sequence;
-    batch.logits[index] = 1;
-}
-
-static void clear_sequences(llama_memory_t memory, uint32_t n_seq_max) {
-    for (uint32_t i = 0; i < n_seq_max; ++i) {
-        llama_memory_seq_rm(memory, static_cast<llama_seq_id>(i), -1, -1);
-    }
-}
-
 }
 
 bool common_decision_load(
@@ -368,6 +425,7 @@ bool common_decision_run(
 
         res = common_decision_result();
         res.n_state_tokens = static_cast<int32_t>(state_tokens.size());
+        double head_ms = 0;
         for (const auto & branch : branches) {
             res.n_branch_tokens.push_back(static_cast<int32_t>(branch.size()));
         }
@@ -450,13 +508,16 @@ bool common_decision_run(
                     clear_sequences(memory, n_seq_max);
                     return fail(err, "decision context was not created with embeddings enabled");
                 }
-                res.probs[base + i] = probabilities(head, decide, options);
+                const auto head_start = std::chrono::steady_clock::now();
+                res.probs[base + i] = common_decision_probabilities(head, decide, options);
+                head_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - head_start).count();
             }
             llama_batch_free(batch);
             base += count;
         }
         const auto branch_end = std::chrono::steady_clock::now();
         res.t_branches_ms = std::chrono::duration<double, std::milli>(branch_end - branch_start).count();
+        res.t_head_ms = head_ms;
         clear_sequences(memory, n_seq_max);
         return true;
     } catch (const std::exception & e) {

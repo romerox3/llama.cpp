@@ -212,6 +212,7 @@ int main(int argc, char ** argv) {
         if (bench > 0) {
             std::vector<double> state_times;
             std::vector<double> branch_times;
+            std::vector<double> head_times;
             for (int i = 0; i < bench; ++i) {
                 common_decision_result measured;
                 if (!common_decision_run(ctx, head, req, measured, err)) {
@@ -219,15 +220,19 @@ int main(int argc, char ** argv) {
                 }
                 state_times.push_back(measured.t_state_ms);
                 branch_times.push_back(measured.t_branches_ms);
+                head_times.push_back(measured.t_head_ms);
             }
             std::sort(state_times.begin(), state_times.end());
             std::sort(branch_times.begin(), branch_times.end());
+            std::sort(head_times.begin(), head_times.end());
             const auto mean = [](const std::vector<double> & values) {
                 return std::accumulate(values.begin(), values.end(), 0.0) / values.size();
             };
-            std::fprintf(stderr, "bench p50: state %.2f ms, branches %.2f ms; mean: state %.2f ms, branches %.2f ms\n",
+            std::fprintf(stderr,
+                "bench p50: state %.2f ms, branches %.2f ms, head %.2f ms; mean: state %.2f ms, branches %.2f ms, head %.2f ms\n",
                 state_times[state_times.size() / 2], branch_times[branch_times.size() / 2],
-                mean(state_times), mean(branch_times));
+                head_times[head_times.size() / 2],
+                mean(state_times), mean(branch_times), mean(head_times));
         }
 
         ordered_json answers = common_decision_answers(req, result);
