@@ -55,6 +55,10 @@ def main() -> None:
     parser.add_argument("--head", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    # serving limits of the Python Kev (kev/model.py SERVE_MAX_STATE, SERVE_MAX_BRANCH)
+    parser.add_argument("--max-state", type=int, default=65536)
+    parser.add_argument("--max-row", type=int, default=65536 + 8192)
+    parser.add_argument("--release-date", help="YYYY-MM-DD for the /v1/models card")
     args = parser.parse_args()
 
     if args.head.suffix != ".json":
@@ -94,9 +98,11 @@ def main() -> None:
     writer.add_uint32("kev.head_dim", head_dim)
     for name, token in TOKENS.items():
         writer.add_int32(f"kev.tokens.{name}", find_token(tokens, token))
-    writer.add_uint32("kev.limits.max_state", 8192)
-    writer.add_uint32("kev.limits.max_row", 8192)
+    writer.add_uint32("kev.limits.max_state", args.max_state)
+    writer.add_uint32("kev.limits.max_row", args.max_row)
     writer.add_string("kev.source", source)
+    if args.release_date:
+        writer.add_string("kev.release_date", args.release_date)
 
     for tensor in reader.tensors:
         writer.add_tensor(tensor.name, tensor.data, raw_shape=tensor.data.shape, raw_dtype=tensor.tensor_type, tensor_endianess=reader.endianess)
