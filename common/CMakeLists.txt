@@ -72,6 +72,8 @@ add_library(${TARGET}
     common.h
     decision.cpp
     decision.h
+    decision-answers.cpp
+    decision-answers.h
     console.cpp
     console.h
     debug.cpp

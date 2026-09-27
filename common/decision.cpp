@@ -1,5 +1,7 @@
 #include "decision.h"
 
+#include "decision-answers.h"
+
 #include "ggml.h"
 #include "gguf.h"
 
@@ -218,10 +220,6 @@ static void clear_sequences(llama_memory_t memory, uint32_t n_seq_max) {
     for (uint32_t i = 0; i < n_seq_max; ++i) {
         llama_memory_seq_rm(memory, static_cast<llama_seq_id>(i), -1, -1);
     }
-}
-
-static double round_4(double value) {
-    return std::round(value * 10000.0) / 10000.0;
 }
 
 }
@@ -589,50 +587,5 @@ bool common_decision_run(
 nlohmann::ordered_json common_decision_answers(
         const common_decision_request & req,
         const common_decision_result & res) {
-    ordered_json answers = ordered_json::object();
-    for (size_t q = 0; q < req.questions.size(); ++q) {
-        const auto & question = req.questions[q];
-        const auto & probs = res.probs[q];
-        if (question.type == "noul") {
-            answers[question.id] = {
-                {"type", "noul"},
-                {"noul", round_4(probs[1])},
-            };
-        } else if (question.type == "choice") {
-            const size_t best = static_cast<size_t>(std::max_element(probs.begin(), probs.end()) - probs.begin());
-            ordered_json distribution = ordered_json::object();
-            for (size_t i = 0; i < probs.size(); ++i) {
-                distribution[question.keys[i]] = round_4(probs[i]);
-            }
-            const double confidence = probs.size() == 1 ? 1.0 :
-                (probs[best] - 1.0 / probs.size()) / (1.0 - 1.0 / probs.size());
-            answers[question.id] = {
-                {"type", "choice"},
-                {"choice", question.keys[best]},
-                {"confidence", round_4(confidence)},
-                {"probabilities", distribution},
-            };
-        } else {
-            const size_t best = static_cast<size_t>(std::max_element(probs.begin(), probs.end()) - probs.begin());
-            double score = 0;
-            double distance = 0;
-            ordered_json distribution = ordered_json::object();
-            ordered_json legend = ordered_json::object();
-            for (size_t i = 0; i < probs.size(); ++i) {
-                score += i * probs[i];
-                distance += probs[i] * std::abs(static_cast<double>(i) - best);
-                distribution[std::to_string(i)] = round_4(probs[i]);
-                legend[question.keys[i]] = question.options[i];
-            }
-            const double confidence = probs.size() == 1 ? 1.0 : 1.0 - distance / (probs.size() - 1);
-            answers[question.id] = {
-                {"type", "score"},
-                {"score", round_4(score)},
-                {"legend", legend},
-                {"probabilities", distribution},
-                {"confidence", round_4(confidence)},
-            };
-        }
-    }
-    return answers;
+    return kev_to_answers(res.probs, req.questions);
 }
