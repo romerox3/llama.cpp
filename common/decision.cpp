@@ -252,6 +252,10 @@ bool common_decision_load(
         return fail(err, "missing Kev source metadata");
     }
     head.source = gguf_get_val_str(gguf, source);
+    const int64_t release_date = gguf_find_key(gguf, "kev.release_date");
+    if (release_date >= 0 && gguf_get_kv_type(gguf, release_date) == GGUF_TYPE_STRING) {
+        head.release_date = gguf_get_val_str(gguf, release_date);
+    }
     cleanup();
     return true;
 }
@@ -303,6 +307,12 @@ bool common_decision_load_json(
         head.tok_opt_start = delimiter(vocab, "<|box_start|>");
         head.tok_opt_end = delimiter(vocab, "<|box_end|>");
         head.tok_decide = delimiter(vocab, "<|fim_suffix|>");
+        if (json.contains("run") && json.at("run").is_string()) {
+            head.source = json.at("run").get<std::string>();
+        }
+        if (json.contains("release_date") && json.at("release_date").is_string()) {
+            head.release_date = json.at("release_date").get<std::string>();
+        }
         return true;
     } catch (const std::exception & e) {
         return fail(err, e.what());
@@ -314,8 +324,7 @@ bool common_decision_run(
         const common_decision_head & head,
         const common_decision_request & req,
         common_decision_result & res,
-        std::string & err,
-        bool * overflow) {
+        std::string & err) {
     try {
         if (llama_pooling_type(ctx) != LLAMA_POOLING_TYPE_NONE) {
             return fail(err, "Kev decision context must use pooling NONE");
@@ -335,18 +344,11 @@ bool common_decision_run(
         common_decision_encoded encoded;
         if (!common_decision_encode(vocab, head.tok_state, head.tok_question, head.tok_opt_start, head.tok_opt_end,
                 head.tok_decide, req.state, questions, head.max_state, head.max_row, encoded, err)) {
-            // row limit overflow: the state is never cut for this, the request is rejected (422)
-            if (overflow != nullptr) {
-                *overflow = true;
-            }
             return false;
         }
         const uint32_t longest = encoded.branch_sizes.empty() ? encoded.n_state :
             encoded.n_state + *std::max_element(encoded.branch_sizes.begin(), encoded.branch_sizes.end());
         if (longest > llama_n_ctx_seq(ctx)) {
-            if (overflow != nullptr) {
-                *overflow = true;
-            }
             return fail(err, "state with the longest question branch is " + std::to_string(longest) +
                 " tokens but the decision context window is " + std::to_string(llama_n_ctx_seq(ctx)) + " tokens");
         }

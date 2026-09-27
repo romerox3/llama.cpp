@@ -25,6 +25,7 @@ struct common_decision_head {
     uint32_t max_state = 8192;
     uint32_t max_row = 8192;
     std::string source;
+    std::string release_date;
 };
 
 bool common_decision_load(
@@ -65,14 +66,12 @@ struct common_decision_result {
     double t_branches_ms = 0;
 };
 
-// overflow, when not null, is set on request rejection for token limits (422)
 bool common_decision_run(
         llama_context * ctx,
         const common_decision_head & head,
         const common_decision_request & req,
         common_decision_result & res,
-        std::string & err,
-        bool * overflow = nullptr);
+        std::string & err);
 
 nlohmann::ordered_json common_decision_answers(
         const common_decision_request & req,

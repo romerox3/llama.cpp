@@ -3503,6 +3503,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KEV_HEAD"));
     add_opt(common_arg(
+        {"--kev-base"}, "MODEL",
+        "base model id reported in the Kev /v1/models cards (default: empty)",
+        [](common_params & params, const std::string & value) {
+            params.kev_base = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KEV_BASE"));
+    add_opt(common_arg(
+        {"--kev-release-date"}, "YYYY-MM-DD",
+        "release date reported in the Kev /v1/models cards, overrides the kev.release_date model metadata (default: empty)",
+        [](common_params & params, const std::string & value) {
+            params.kev_release_date = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KEV_RELEASE_DATE"));
+    add_opt(common_arg(
+        {"--kev-date-facts"},
+        "compute date facts and append them to the request state (default: disabled)",
+        [](common_params & params) {
+            params.kev_date_facts = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KEV_DATE_FACTS"));
+    add_opt(common_arg(
         {"--api-key-file"}, "FNAME",
         "path to file containing API keys, one per line; lines starting with a hash are treated as comments (default: none)",
         [](common_params & params, const std::string & value) {

@@ -10,6 +10,8 @@
 
 #include "build-info.h"
 #include "common.h"
+#include "decision-answers.h"
+#include "decision-rng.h"
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
@@ -19,8 +21,10 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cinttypes>
+#include <cstdio>
 #include <exception>
 #include <memory>
 #include <filesystem>
@@ -4678,6 +4682,63 @@ json server_routes::get_model_info() const {
     return get_res_model_info(*meta);
 }
 
+namespace {
+
+// uuid4 hex, like the Python Kev middleware fallback for x-typesafe-request-id
+std::string kev_uuid4_hex() {
+    static std::mutex kev_uuid_mutex;
+    static std::mt19937_64 kev_uuid_gen{std::random_device{}()};
+    std::lock_guard<std::mutex> lock(kev_uuid_mutex);
+    const uint64_t hi = kev_uuid_gen();
+    const uint64_t lo = kev_uuid_gen();
+    unsigned char bytes[16];
+    for (int i = 0; i < 8; ++i) {
+        bytes[i] = static_cast<unsigned char>((hi >> (8 * i)) & 0xff);
+        bytes[8 + i] = static_cast<unsigned char>((lo >> (8 * i)) & 0xff);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+    static const char * hex = "0123456789abcdef";
+    std::string out(32, ' ');
+    for (int i = 0; i < 16; ++i) {
+        out[2 * i] = hex[bytes[i] >> 4];
+        out[2 * i + 1] = hex[bytes[i] & 0xf];
+    }
+    return out;
+}
+
+// Starlette-flavoured JSON response for the Kev routes
+void kev_set_response(server_http_res & res, const nlohmann::ordered_json & body, int status) {
+    res.status = status;
+    res.content_type = "application/json";
+    res.data = kev_json_body(body);
+}
+
+// middleware headers of the Kev routes: request id echo or uuid4, plus app timing
+void kev_set_headers(server_http_res & res, const server_http_req & req,
+        const std::chrono::steady_clock::time_point & start) {
+    const auto it = req.headers.find("x-typesafe-request-id");
+    res.headers["x-typesafe-request-id"] =
+        it != req.headers.end() && !it->second.empty() ? it->second : kev_uuid4_hex();
+    const double dur = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    char buf[32];
+    snprintf(buf, sizeof(buf), "app;dur=%.1f", dur);
+    res.headers["server-timing"] = buf;
+}
+
+void kev_set_error(server_http_res & res, const server_http_req & req,
+        const std::chrono::steady_clock::time_point & start, int status, const std::string & detail) {
+    kev_set_headers(res, req, start);
+    kev_set_response(res, {{"detail", detail}}, status);
+}
+
+// resolves the card release date: option value first, then kev.release_date metadata
+std::string kev_release_date(const common_params & params, const common_decision_head & head) {
+    return !params.kev_release_date.empty() ? params.kev_release_date : head.release_date;
+}
+
+} // namespace
+
 void server_routes::init_routes() {
     // IMPORTANT: all lambda functions must start with create_response()
     // this is to ensure that the server_res_generator can handle sleeping case correctly
@@ -5100,10 +5161,37 @@ void server_routes::init_routes() {
         return res;
     };
 
-    this->get_models = [this](const server_http_req &) {
+    this->get_models = [this](const server_http_req & req) {
         auto res = create_response(true);
+        const auto start = std::chrono::steady_clock::now();
         // note: do NOT use ctx_server here, this endpoint must be accessible during sleep
-        if (queue_tasks.is_sleeping()) {
+        if (ctx_server.decision) {
+            // Kev card list, matching the Python Kev /v1/models response
+            const auto & head = ctx_server.decision->get_head();
+            char description[256];
+            snprintf(description, sizeof(description), "Kev pointer head on %s, serving %s at temperature %.2f",
+                params.kev_base.c_str(), head.source.c_str(), static_cast<double>(head.temperature));
+            const nlohmann::ordered_json card = {
+                {"description", description},
+                {"release_date", kev_release_date(params, head)},
+                {"run", head.source},
+                {"base", params.kev_base},
+                {"temperature", static_cast<double>(head.temperature)},
+                {"backend", "llama.cpp"},
+            };
+            nlohmann::ordered_json models = nlohmann::ordered_json::array();
+            for (const char * name : {"kev-latest", "jev-latest"}) {
+                nlohmann::ordered_json entry = {
+                    {"name", name},
+                };
+                for (auto it = card.begin(); it != card.end(); ++it) {
+                    entry[it.key()] = it.value();
+                }
+                models.push_back(std::move(entry));
+            }
+            kev_set_headers(*res, req, start);
+            kev_set_response(*res, {{"models", models}}, 200);
+        } else if (queue_tasks.is_sleeping()) {
             std::unique_lock<std::mutex> lock(mutex_cache);
             res->ok(cached_models);
         } else {
@@ -5257,29 +5345,202 @@ void server_routes::init_routes() {
 
     this->post_systemone = [this](const server_http_req & req) {
         auto res = create_response(true);
-        if (!ctx_server.decision) {
-            res->error(format_error_response("File Not Found", ERROR_TYPE_NOT_FOUND));
-            return res;
-        }
+        const auto start = std::chrono::steady_clock::now();
         try {
-            const auto body = nlohmann::ordered_json::parse(req.body);
-            nlohmann::ordered_json result;
-            std::string err;
-            if (!ctx_server.decision->run(body, result, err)) {
-                const auto type = ctx_server.decision->overflow ? ERROR_TYPE_UNPROCESSABLE : ERROR_TYPE_INVALID_REQUEST;
-                res->error(format_error_response(err, type));
+            if (!ctx_server.decision) {
+                kev_set_error(*res, req, start, 404, "Not Found");
                 return res;
             }
-            const std::string model = meta->model_name;
+            const auto body = nlohmann::ordered_json::parse(req.body);
+            common_decision_request creq;
+            std::string err;
+            server_decision_answer answer;
+            if (!ctx_server.decision->parse(body, creq, err) ||
+                    !ctx_server.decision->answer(creq, answer, err)) {
+                kev_set_error(*res, req, start, 422, err);
+                return res;
+            }
             const nlohmann::ordered_json response = {
-                {"model", model},
-                {"answers", result.at("answers")},
-                {"latency_ms", result.at("latency_ms")},
+                {"model", creq.model},
+                {"answers", answer.answers},
+                {"usage", {
+                    {"input_tokens", answer.input_tokens},
+                    {"output_tokens", answer.output_tokens},
+                }},
+                {"latency_ms", answer.latency_ms},
             };
-            res->headers["x-typesafe-request-id"] = random_string();
-            res->ok(json::parse(response.dump()));
+            kev_set_headers(*res, req, start);
+            kev_set_response(*res, response, 200);
         } catch (const std::exception & e) {
-            res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+            kev_set_error(*res, req, start, 422, e.what());
+        }
+        return res;
+    };
+
+    this->post_systemone_permute = [this](const server_http_req & req) {
+        auto res = create_response(true);
+        const auto start = std::chrono::steady_clock::now();
+        try {
+            if (!ctx_server.decision) {
+                kev_set_error(*res, req, start, 404, "Not Found");
+                return res;
+            }
+            const auto body = nlohmann::ordered_json::parse(req.body);
+            std::string err;
+            if (!body.is_object() || !body.contains("request") || !body.at("request").is_object()) {
+                kev_set_error(*res, req, start, 422, "request must be an object");
+                return res;
+            }
+            if (!body.contains("question") || !body.at("question").is_string()) {
+                kev_set_error(*res, req, start, 422, "question must be a string");
+                return res;
+            }
+            int64_t n_perm = 6;
+            if (body.contains("n_perm") && !body.at("n_perm").is_null()) {
+                if (!body.at("n_perm").is_number_integer()) {
+                    kev_set_error(*res, req, start, 422, "n_perm must be an integer");
+                    return res;
+                }
+                n_perm = body.at("n_perm").get<int64_t>();
+            }
+            if (n_perm < 1 || n_perm > 64) {
+                kev_set_error(*res, req, start, 422, "n_perm must be between 1 and 64");
+                return res;
+            }
+            uint64_t seed = 0;
+            if (body.contains("seed") && !body.at("seed").is_null()) {
+                if (!body.at("seed").is_number_integer()) {
+                    kev_set_error(*res, req, start, 422, "seed must be an integer");
+                    return res;
+                }
+                seed = kev_random_seed(body.at("seed"));
+            }
+
+            common_decision_request creq;
+            if (!ctx_server.decision->parse(body.at("request"), creq, err)) {
+                kev_set_error(*res, req, start, 422, err);
+                return res;
+            }
+            const std::string question_id = body.at("question").get<std::string>();
+            const common_decision_question * question = nullptr;
+            for (const auto & q : creq.questions) {
+                if (q.id == question_id) {
+                    question = &q;
+                    break;
+                }
+            }
+            if (question == nullptr || question->type != "choice") {
+                kev_set_error(*res, req, start, 422, "question must be an existing choice question");
+                return res;
+            }
+
+            const std::vector<std::string> keys = question->keys;
+            kev_random rng(seed);
+            nlohmann::ordered_json runs = nlohmann::ordered_json::array();
+            std::vector<double> mins(keys.size(), 0.0);
+            std::vector<double> maxs(keys.size(), 0.0);
+            for (int64_t i = 0; i < n_perm; ++i) {
+                std::vector<std::string> order = keys;
+                if (i > 0) {
+                    rng.shuffle(order);
+                }
+                common_decision_question reordered = *question;
+                reordered.keys.clear();
+                reordered.options.clear();
+                for (const auto & key : order) {
+                    const size_t idx = std::find(keys.begin(), keys.end(), key) - keys.begin();
+                    reordered.keys.push_back(key);
+                    reordered.options.push_back(question->options[idx]);
+                }
+                common_decision_request one = creq;
+                one.questions.assign(1, reordered);
+                server_decision_answer answer;
+                if (!ctx_server.decision->answer(one, answer, err)) {
+                    kev_set_error(*res, req, start, 422, err);
+                    return res;
+                }
+                const auto & a = answer.answers.at(question_id);
+                runs.push_back({
+                    {"order", order},
+                    {"probabilities", a.at("probabilities")},
+                    {"choice", a.at("choice")},
+                    {"latency_ms", answer.latency_ms},
+                });
+                for (size_t k = 0; k < keys.size(); ++k) {
+                    const double p = a.at("probabilities").at(keys[k]).get<double>();
+                    mins[k] = i == 0 ? p : std::min(mins[k], p);
+                    maxs[k] = i == 0 ? p : std::max(maxs[k], p);
+                }
+            }
+            nlohmann::ordered_json spread = nlohmann::ordered_json::object();
+            for (size_t k = 0; k < keys.size(); ++k) {
+                spread[keys[k]] = maxs[k] - mins[k];
+            }
+            bool argmax_stable = true;
+            for (const auto & run : runs) {
+                if (run.at("choice").get<std::string>() != runs[0].at("choice").get<std::string>()) {
+                    argmax_stable = false;
+                    break;
+                }
+            }
+            const nlohmann::ordered_json response = {
+                {"runs", runs},
+                {"argmax_stable", argmax_stable},
+                {"spread", spread},
+            };
+            kev_set_headers(*res, req, start);
+            kev_set_response(*res, response, 200);
+        } catch (const std::exception & e) {
+            kev_set_error(*res, req, start, 422, e.what());
+        }
+        return res;
+    };
+
+    this->post_systemone_separate = [this](const server_http_req & req) {
+        auto res = create_response(true);
+        const auto start = std::chrono::steady_clock::now();
+        try {
+            if (!ctx_server.decision) {
+                kev_set_error(*res, req, start, 404, "Not Found");
+                return res;
+            }
+            const auto body = nlohmann::ordered_json::parse(req.body);
+            common_decision_request creq;
+            std::string err;
+            if (!ctx_server.decision->parse(body, creq, err)) {
+                kev_set_error(*res, req, start, 422, err);
+                return res;
+            }
+            nlohmann::ordered_json answers = nlohmann::ordered_json::object();
+            int64_t input_tokens = 0;
+            double latency_sum = 0;
+            for (const auto & question : creq.questions) {
+                common_decision_request one = creq;
+                one.questions.assign(1, question);
+                server_decision_answer answer;
+                if (!ctx_server.decision->answer(one, answer, err)) {
+                    kev_set_error(*res, req, start, 422, err);
+                    return res;
+                }
+                for (auto it = answer.answers.begin(); it != answer.answers.end(); ++it) {
+                    answers[it.key()] = it.value();
+                }
+                input_tokens += answer.input_tokens;
+                latency_sum += answer.latency_ms;
+            }
+            const nlohmann::ordered_json response = {
+                {"model", creq.model},
+                {"answers", answers},
+                {"usage", {
+                    {"input_tokens", input_tokens},
+                    {"output_tokens", ctx_server.decision->token_count(kev_json_dumps(answers))},
+                }},
+                {"latency_ms", std::round(latency_sum * 10.0) / 10.0},
+            };
+            kev_set_headers(*res, req, start);
+            kev_set_response(*res, response, 200);
+        } catch (const std::exception & e) {
+            kev_set_error(*res, req, start, 422, e.what());
         }
         return res;
     };

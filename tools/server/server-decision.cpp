@@ -1,11 +1,36 @@
 #include "server-decision.h"
 #include "server-common.h"
 
+#include "decision-answers.h"
+#include "decision-render.h"
+
 #include "llama.h"
 
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <numeric>
+
+namespace {
+
+int64_t tokenize_count(const llama_vocab * vocab, const std::string & text) {
+    const int32_t n = llama_tokenize(vocab, text.data(), static_cast<int32_t>(text.size()), nullptr, 0, false, false);
+    if (n == INT32_MIN) {
+        throw std::runtime_error("tokenization size overflow");
+    }
+    if (n >= 0) {
+        return n;
+    }
+    std::vector<llama_token> tokens(static_cast<size_t>(-n));
+    const int32_t got = llama_tokenize(vocab, text.data(), static_cast<int32_t>(text.size()), tokens.data(),
+        static_cast<int32_t>(tokens.size()), false, false);
+    if (got < 0) {
+        throw std::runtime_error("tokenization failed");
+    }
+    return got;
+}
+
+} // namespace
 
 server_decision::~server_decision() {
     llama_free(ctx);
@@ -23,6 +48,8 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
     } else if (!common_decision_load(params.model.path, head, err)) {
         return false;
     }
+    this->vocab = vocab;
+    date_facts = params.kev_date_facts;
 
     const uint32_t row_cap = std::min(head.max_row, llama_n_ctx_seq(main_ctx));
     if (row_cap == 0) {
@@ -52,22 +79,31 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
     return true;
 }
 
-bool server_decision::run(const nlohmann::ordered_json & body, nlohmann::ordered_json & response, std::string & err) {
-    overflow = false;
-    common_decision_request req;
-    if (!common_decision_parse(body, req, err)) {
-        return false;
+bool server_decision::parse(const nlohmann::ordered_json & body, common_decision_request & req, std::string & err) {
+    if (date_facts && body.is_object() && body.contains("state")) {
+        nlohmann::ordered_json with_facts = body;
+        with_facts["state"] = kev_with_date_facts(body.at("state"));
+        return common_decision_parse(with_facts, req, err);
     }
+    return common_decision_parse(body, req, err);
+}
 
+bool server_decision::answer(const common_decision_request & req, server_decision_answer & out, std::string & err) {
     std::lock_guard<std::mutex> lock(mutex);
     common_decision_result result;
-    if (!common_decision_run(ctx, head, req, result, err, &overflow)) {
+    if (!common_decision_run(ctx, head, req, result, err)) {
         return false;
     }
 
-    response = {
-        {"answers", common_decision_answers(req, result)},
-        {"latency_ms", std::round((result.t_state_ms + result.t_branches_ms) * 10.0) / 10.0},
-    };
+    out = server_decision_answer();
+    out.answers = common_decision_answers(req, result);
+    out.input_tokens = result.n_state_tokens +
+        std::accumulate(result.n_branch_tokens.begin(), result.n_branch_tokens.end(), 0);
+    out.output_tokens = tokenize_count(vocab, kev_json_dumps(out.answers));
+    out.latency_ms = std::round((result.t_state_ms + result.t_branches_ms) * 10.0) / 10.0;
     return true;
+}
+
+int64_t server_decision::token_count(const std::string & text) const {
+    return tokenize_count(vocab, text);
 }
