@@ -3524,6 +3524,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KEV_DATE_FACTS"));
     add_opt(common_arg(
+        {"--kev-skip-lm-head"},
+        "Kev decision context: skip the LM head graph, embeddings only (default: disabled)",
+        [](common_params & params) {
+            params.kev_skip_lm_head = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--kev-masked-outputs"},
+        "Kev decision context: compute embeddings only for the marked output tokens (default: disabled)",
+        [](common_params & params) {
+            params.kev_masked_outputs = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--api-key-file"}, "FNAME",
         "path to file containing API keys, one per line; lines starting with a hash are treated as comments (default: none)",
         [](common_params & params, const std::string & value) {

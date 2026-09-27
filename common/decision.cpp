@@ -2,6 +2,8 @@
 
 #include "decision-answers.h"
 
+#include "../src/llama-ext.h" // staging API: llama_get_embeddings_masked
+
 #include "ggml.h"
 #include "gguf.h"
 
@@ -124,12 +126,13 @@ static void batch_add(
         int32_t index,
         llama_token token,
         llama_pos position,
-        llama_seq_id sequence) {
+        llama_seq_id sequence,
+        bool output) {
     batch.token[index] = token;
     batch.pos[index] = position;
     batch.n_seq_id[index] = 1;
     batch.seq_id[index][0] = sequence;
-    batch.logits[index] = 1;
+    batch.logits[index] = output ? 1 : 0;
 }
 
 static void clear_sequences(llama_memory_t memory, uint32_t n_seq_max) {
@@ -433,9 +436,11 @@ bool common_decision_run(
         llama_memory_t memory = llama_get_memory(ctx);
         const uint32_t n_seq_max = llama_n_seq_max(ctx);
         clear_sequences(memory, n_seq_max);
+        // masked mode: the state prefill produces no outputs, only cache rows for the branches
+        const bool masked = llama_get_embeddings_masked(ctx);
         llama_batch state_batch = llama_batch_init(static_cast<int32_t>(state_tokens.size()), 0, 1);
         for (size_t i = 0; i < state_tokens.size(); ++i) {
-            batch_add(state_batch, static_cast<int32_t>(i), state_tokens[i], static_cast<llama_pos>(i), 0);
+            batch_add(state_batch, static_cast<int32_t>(i), state_tokens[i], static_cast<llama_pos>(i), 0, !masked);
         }
         state_batch.n_tokens = static_cast<int32_t>(state_tokens.size());
         const auto state_start = std::chrono::steady_clock::now();
@@ -480,8 +485,13 @@ bool common_decision_run(
             for (size_t i = 0; i < count; ++i) {
                 offsets[i] = index;
                 for (size_t j = 0; j < branches[base + i].size(); ++j) {
+                    // masked mode: only the </opt> and <decide> delimiters are outputs
+                    const bool output = !masked ||
+                        static_cast<int32_t>(j) == decides[base + i] ||
+                        std::find(option_ends[base + i].begin(), option_ends[base + i].end(),
+                            static_cast<int32_t>(j)) != option_ends[base + i].end();
                     batch_add(batch, static_cast<int32_t>(index++), branches[base + i][j],
-                        static_cast<llama_pos>(state_tokens.size() + j), static_cast<llama_seq_id>(i + 1));
+                        static_cast<llama_pos>(state_tokens.size() + j), static_cast<llama_seq_id>(i + 1), output);
                 }
             }
             batch.n_tokens = static_cast<int32_t>(index);

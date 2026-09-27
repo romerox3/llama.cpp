@@ -118,6 +118,8 @@ llama_context::llama_context(
     cparams.embeddings              = params.embeddings;
     cparams.embeddings_nextn        = false;
     cparams.embeddings_nextn_masked = false;
+    cparams.embeddings_skip_lm_head = false;
+    cparams.embeddings_masked       = false;
     cparams.offload_kqv             = params.offload_kqv;
     cparams.no_perf                 = params.no_perf;
     cparams.warmup                  = false;
@@ -1232,6 +1234,18 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
     cparams.embeddings_nextn_masked = masked;
 }
 
+void llama_context::set_embeddings_skip_lm_head(bool value) {
+    LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
+
+    cparams.embeddings_skip_lm_head = value;
+}
+
+void llama_context::set_embeddings_masked(bool value) {
+    LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
+
+    cparams.embeddings_masked = value;
+}
+
 void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
     LLAMA_LOG_DEBUG("%s: lid = %d, enable = %d\n", __func__, lid, enable);
 
@@ -1725,8 +1739,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
     const bool    dflash_embd = model.arch == LLM_ARCH_DFLASH && batch_inp.embd;
     const int64_t n_embd  = mtp_embd ? hparams.n_embd_out() : dflash_embd ? hparams.n_embd_inp_enc() : hparams.n_embd_inp();
 
-    // when computing embeddings, all tokens are output
-    const bool output_all   = cparams.embeddings;
+    // when computing embeddings, all tokens are output, unless masked output is enabled:
+    // then batch.logits decides which tokens are output (embedding + pooling NONE only)
+    const bool output_all   = cparams.embeddings && !(cparams.embeddings_masked && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE);
     const bool has_samplers = !sampling.samplers.empty();
 
     const uint32_t n_seq_max = cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max;
@@ -3969,6 +3984,18 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
 
 void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {
     ctx->set_embeddings_nextn(value, masked);
+}
+
+void llama_set_embeddings_skip_lm_head(llama_context * ctx, bool value) {
+    ctx->set_embeddings_skip_lm_head(value);
+}
+
+void llama_set_embeddings_masked(llama_context * ctx, bool value) {
+    ctx->set_embeddings_masked(value);
+}
+
+bool llama_get_embeddings_masked(const llama_context * ctx) {
+    return ctx->get_embeddings_masked();
 }
 
 void llama_set_embeddings_layer_inp(llama_context * ctx, uint32_t lid, bool value) {

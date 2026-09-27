@@ -4,6 +4,8 @@
 #include "decision-answers.h"
 #include "decision-render.h"
 
+#include "../../src/llama-ext.h" // staging API: llama_set_embeddings_skip_lm_head / llama_set_embeddings_masked
+
 #include "llama.h"
 
 #include <algorithm>
@@ -73,6 +75,14 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
     if (ctx == nullptr) {
         err = "failed to create Kev decision context";
         return false;
+    }
+
+    // performance-only flags: set before the first decode of this context
+    if (params.kev_skip_lm_head) {
+        llama_set_embeddings_skip_lm_head(ctx, true);
+    }
+    if (params.kev_masked_outputs) {
+        llama_set_embeddings_masked(ctx, true);
     }
 
     SRV_INF("Kev decision context: %u rows x %u tokens\n", llama_n_seq_max(ctx), llama_n_ctx_seq(ctx));

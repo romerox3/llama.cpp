@@ -95,6 +95,21 @@ LLAMA_API llama_memory_breakdown llama_get_memory_breakdown(const struct llama_c
 // If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
 LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value, bool masked);
 
+// Set whether the LM head (output logits) is built during embedding decodes
+// If skip == true and cparams.embeddings is set, the graph ends at the final norm and no
+// logits are produced. Intended for embedding-only consumers such as the Kev decision head.
+// Must be set before the first decode. Default false.
+LLAMA_API void llama_set_embeddings_skip_lm_head(struct llama_context * ctx, bool value);
+
+// Set whether embeddings are output only for the tokens with batch.logits != 0
+// Only meaningful with cparams.embeddings and pooling type NONE. When enabled, decode()
+// respects batch.logits instead of outputting every token, and memory batching is not
+// forced to split by sequence. Must be set before the first decode. Default false.
+LLAMA_API void llama_set_embeddings_masked(struct llama_context * ctx, bool value);
+
+// Returns whether masked embedding output is enabled for this context
+LLAMA_API bool llama_get_embeddings_masked(const struct llama_context * ctx);
+
 // Select which appended NextN block the DECODER_MTP graph runs (offset past
 // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
 // chain multiple trained NextN heads. Default 0 (first head).

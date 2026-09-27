@@ -3,6 +3,8 @@
 #include "decision.h"
 #include "log.h"
 
+#include "../../src/llama-ext.h" // staging API: llama_set_embeddings_skip_lm_head / llama_set_embeddings_masked
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -37,7 +39,10 @@ static void print_usage(int, char ** argv) {
         "  --json FILE        TypeSafe request JSON, or - for stdin\n"
         "  --kev-head FILE    load head.json instead of embedded Kev metadata\n"
         "  --check FILE       compare all cases in a reference.json fixture\n"
-        "  --bench N          repeat a JSON request N times after warmup\n",
+        "  --bench N          repeat a JSON request N times after warmup\n"
+        "  --kev-skip-lm-head skip the LM head graph (embedding-only consumers)\n"
+        "  --kev-masked-outputs compute embeddings only for the marked output tokens\n"
+        "  --raw-probs        include raw_probs in the JSON response\n",
         argv[0], argv[0], argv[0]);
 }
 
@@ -49,6 +54,9 @@ static bool parse_custom_args(
         std::string & head_path,
         std::string & check_path,
         int & bench,
+        bool & skip_lm_head,
+        bool & masked_outputs,
+        bool & raw_probs,
         std::string & err) {
     llama_argv.push_back(argv[0]);
     for (int i = 1; i < argc; ++i) {
@@ -73,6 +81,12 @@ static bool parse_custom_args(
                     return false;
                 }
             }
+        } else if (arg == "--kev-skip-lm-head") {
+            skip_lm_head = true;
+        } else if (arg == "--kev-masked-outputs") {
+            masked_outputs = true;
+        } else if (arg == "--raw-probs") {
+            raw_probs = true;
         } else {
             llama_argv.push_back(argv[i]);
         }
@@ -130,8 +144,12 @@ int main(int argc, char ** argv) {
         std::string head_path;
         std::string check_path;
         int bench = 0;
+        bool skip_lm_head = false;
+        bool masked_outputs = false;
+        bool raw_probs = false;
         std::string err;
-        if (!parse_custom_args(argc, argv, llama_argv, json_path, head_path, check_path, bench, err)) {
+        if (!parse_custom_args(argc, argv, llama_argv, json_path, head_path, check_path, bench,
+                skip_lm_head, masked_outputs, raw_probs, err)) {
             std::fprintf(stderr, "%s\n", err.c_str());
             print_usage(argc, argv);
             return 2;
@@ -178,6 +196,13 @@ int main(int argc, char ** argv) {
         llama_model * model = llama_init->model();
         if (ctx == nullptr || model == nullptr) {
             throw std::runtime_error("failed to initialize model context");
+        }
+
+        if (skip_lm_head) {
+            llama_set_embeddings_skip_lm_head(ctx, true);
+        }
+        if (masked_outputs) {
+            llama_set_embeddings_masked(ctx, true);
         }
 
         common_decision_head head;
@@ -248,6 +273,9 @@ int main(int argc, char ** argv) {
             }},
             {"latency_ms", std::round((result.t_state_ms + result.t_branches_ms) * 10.0) / 10.0},
         };
+        if (raw_probs) {
+            response["raw_probs"] = result.probs;
+        }
         std::cout << response.dump() << '\n';
         return 0;
     } catch (const std::exception & e) {

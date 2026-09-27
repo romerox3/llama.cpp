@@ -511,6 +511,8 @@ struct common_params {
     std::string kev_base             = ""; // Kev /v1/models card base model id                             // NOLINT
     std::string kev_release_date     = ""; // Kev /v1/models card release date                              // NOLINT
     bool        kev_date_facts       = false; // append computed date facts to the request state             // NOLINT
+    bool kev_skip_lm_head            = false; // Kev decision context: skip the LM head graph               // NOLINT
+    bool kev_masked_outputs          = false; // Kev decision context: embeddings only for marked tokens     // NOLINT
     std::string prompt               = "";                                                                  // NOLINT
     std::string system_prompt        = "";                                                                  // NOLINT
     std::string prompt_file          = ""; // store the external prompt file name                           // NOLINT
