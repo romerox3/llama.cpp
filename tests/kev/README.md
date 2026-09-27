@@ -18,6 +18,7 @@ To regenerate them, run `gen_golden.py` against the pinned Kev commit and commit
 | `answers.jsonl` | `api.to_answers`, `api.output_tokens`, Starlette `JSONResponse` | answers from float32 probabilities; `output_tokens_text` is `json.dumps(answers)`; `body_text` is the wire body without `usage` and `latency_ms` |
 | `confidence.jsonl` | `api.choice_confidence`, `api.score_confidence` | confidence formulas (not rounded) |
 | `round.jsonl` | `api.round_prob` | `round(x, 4)` and its JSON text |
+| `permute_orders.jsonl` | `serve.systemone_permute` | option orders for `/v1/systemone/permute`: `random.Random(seed)`, first order as given, then `rng.shuffle` (`tools/kev/golden/gen_permute.py`) |
 | `date_facts.jsonl`, `with_date_facts.jsonl` | `api.date_facts`, `api.with_date_facts` | opt-in date preprocessing (`KEV_DATE_FACTS=1`) |
 
 The tokenizer tests use `models/ggml-vocab-kev-9b.gguf`, which holds only the metadata of the Kev-9B GGUF (no tensors).
