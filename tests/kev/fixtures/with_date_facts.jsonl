@@ -1,0 +1,4 @@
+{"json": "\"July 22, 2026 and August 3, 2026\"", "expected": "July 22, 2026 and August 3, 2026\n\ndate_facts: August 3, 2026 is 12 days after July 22, 2026."}
+{"json": "{\"a\":\"2026-01-01\",\"b\":\"2026-02-01\"}", "expected": {"a": "2026-01-01", "b": "2026-02-01", "date_facts": "2026-02-01 is 31 days after 2026-01-01."}}
+{"json": "[\"2026-01-01\",\"2026-01-05\"]", "expected": ["2026-01-01", "2026-01-05", {"date_facts": "2026-01-05 is 4 days after 2026-01-01."}]}
+{"json": "\"one 2026-01-01\"", "expected": "one 2026-01-01"}

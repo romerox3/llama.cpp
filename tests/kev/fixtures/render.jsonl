@@ -1,0 +1,46 @@
+{"json": "\"hola\"", "expected": "hola"}
+{"json": "\"\"", "expected": ""}
+{"json": "null", "expected": ""}
+{"json": "0", "expected": "0"}
+{"json": "-3", "expected": "-3"}
+{"json": "7", "expected": "7"}
+{"json": "1.0", "expected": "1.0"}
+{"json": "1.5", "expected": "1.5"}
+{"json": "0.1", "expected": "0.1"}
+{"json": "-0.0", "expected": "-0.0"}
+{"json": "2.5e-5", "expected": "2.5e-05"}
+{"json": "0.0001", "expected": "0.0001"}
+{"json": "1e-7", "expected": "1e-07"}
+{"json": "1e16", "expected": "1e+16"}
+{"json": "1e15", "expected": "1000000000000000.0"}
+{"json": "123456.789", "expected": "123456.789"}
+{"json": "1e20", "expected": "1e+20"}
+{"json": "3.0e0", "expected": "3.0"}
+{"json": "1.7976931348623157e308", "expected": "1.7976931348623157e+308"}
+{"json": "5e-324", "expected": "5e-324"}
+{"json": "123456789012345678901234567890", "expected": "123456789012345678901234567890"}
+{"json": "9007199254740993", "expected": "9007199254740993"}
+{"json": "-9223372036854775809", "expected": "-9223372036854775809"}
+{"json": "true", "expected": "True"}
+{"json": "false", "expected": "False"}
+{"json": "[]", "expected": ""}
+{"json": "{}", "expected": ""}
+{"json": "[1,\"a\",null,true,2.0]", "expected": "- 1\n- a\n- \n- True\n- 2.0"}
+{"json": "{\"a\":1,\"b\":{\"c\":[1,2,{\"d\":\"x\"}]},\"e\":[]}", "expected": "a: 1\nb:\n  c:\n    - 1\n    - 2\n    - d: x\ne:\n"}
+{"json": "[[1,2],[3,[4]]]", "expected": "- - 1\n  - 2\n- - 3\n  - - 4"}
+{"json": "{\"k\":null}", "expected": "k: "}
+{"json": "{\"k\":\"\"}", "expected": "k: "}
+{"json": "{\"k\":{}}", "expected": "k:\n"}
+{"json": "{\"k\":[]}", "expected": "k:\n"}
+{"json": "\"ñandú € 漢字 🙂\"", "expected": "ñandú € 漢字 🙂"}
+{"json": "\"line1\\nline2\\r\\nline3\\ttab\"", "expected": "line1\nline2\r\nline3\ttab"}
+{"json": "\"  leading and trailing  \"", "expected": "  leading and trailing  "}
+{"json": "[{\"a\":1,\"b\":[1,{\"c\":2}]},{\"d\":null}]", "expected": "- a: 1\n  b:\n    - 1\n    - c: 2\n- d: "}
+{"json": "{\"z\":1,\"a\":2,\"m\":3}", "expected": "z: 1\na: 2\nm: 3"}
+{"json": "{\"nested\":{\"deeper\":{\"deepest\":[true,false]}}}", "expected": "nested:\n  deeper:\n    deepest:\n      - True\n      - False"}
+{"json": "[\" x\", \"- y\", \"\"]", "expected": "- x\n- - y\n- "}
+{"json": "{\"a b\":\"c: d\",\"\":\"empty key\"}", "expected": "a b: c: d\n: empty key"}
+{"json": "[[[]]]", "expected": "- - "}
+{"json": "[{}]", "expected": "- "}
+{"json": "{\"list\":[[1,2],[3]]}", "expected": "list:\n  - - 1\n    - 2\n  - - 3"}
+{"json": "{\"price\":19.99,\"qty\":3,\"ratio\":0.3333333333333333,\"big\":1e300}", "expected": "price: 19.99\nqty: 3\nratio: 0.3333333333333333\nbig: 1e+300"}

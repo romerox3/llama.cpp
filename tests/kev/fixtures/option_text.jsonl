@@ -1,0 +1,10 @@
+{"name": "no", "desc_json": "null", "expected": "no"}
+{"name": "yes", "desc_json": "\"\"", "expected": "yes"}
+{"name": "a", "desc_json": "\"desc\"", "expected": "a: desc"}
+{"name": "b", "desc_json": "{\"x\": 1, \"y\": [1, 2]}", "expected": "b: x: 1\ny:\n  - 1\n  - 2"}
+{"name": "c", "desc_json": "[\"p\", \"q\"]", "expected": "c: - p\n- q"}
+{"name": "d", "desc_json": "0", "expected": "d: 0"}
+{"name": "e", "desc_json": "false", "expected": "e: False"}
+{"name": "f", "desc_json": "0.0", "expected": "f: 0.0"}
+{"name": "g", "desc_json": "\" \"", "expected": "g:  "}
+{"name": "ñ", "desc_json": "\"ü\"", "expected": "ñ: ü"}

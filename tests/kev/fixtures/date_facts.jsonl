@@ -1,0 +1,11 @@
+{"text": "", "expected": ""}
+{"text": "no dates here", "expected": ""}
+{"text": "July 22, 2026", "expected": ""}
+{"text": "July 22, 2026 and August 3, 2026", "expected": "August 3, 2026 is 12 days after July 22, 2026."}
+{"text": "2026-01-01 then 2026-01-01", "expected": ""}
+{"text": "2026-02-28, 2026-03-01 and 2024-02-29", "expected": "2026-03-01 is 1 day after 2026-02-28. 2024-02-29 is 730 days before 2026-02-28. 2024-02-29 is 731 days before 2026-03-01."}
+{"text": "Signed on March 5, 2025; due 2025-04-04; paid April 4, 2025.", "expected": "2025-04-04 is 30 days after March 5, 2025. April 4, 2025 is 30 days after March 5, 2025. April 4, 2025 is the same day as 2025-04-04."}
+{"text": "bad date 2026-13-45 and 2026-01-02 and February 30, 2026 and 2026-01-03", "expected": "2026-01-03 is 1 day after 2026-01-02."}
+{"text": "1 de enero de 2026 y 2026-01-10", "expected": ""}
+{"text": "September 1, 2026 September 1, 2026 2026-09-02", "expected": "2026-09-02 is 1 day after September 1, 2026."}
+{"text": "Mayday May 1, 2026 x May 01, 2026", "expected": "May 01, 2026 is the same day as May 1, 2026."}
