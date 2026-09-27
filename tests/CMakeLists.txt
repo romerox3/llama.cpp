@@ -135,6 +135,9 @@ llama_test(test-tokenizer-0 NAME test-tokenizer-0-qwen35            ARGS ${PROJE
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-refact            ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-refact.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-starcoder         ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-starcoder.gguf)
 
+llama_build_and_test(test-kev-encode.cpp
+    ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-kev-9b.gguf ${PROJECT_SOURCE_DIR}/tests/kev/fixtures)
+
 if (NOT WIN32)
     llama_test_cmd(
         ${CMAKE_CURRENT_SOURCE_DIR}/test-tokenizers-repo.sh

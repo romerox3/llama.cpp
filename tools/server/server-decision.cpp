@@ -53,6 +53,7 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
 }
 
 bool server_decision::run(const nlohmann::ordered_json & body, nlohmann::ordered_json & response, std::string & err) {
+    overflow = false;
     common_decision_request req;
     if (!common_decision_parse(body, req, err)) {
         return false;
@@ -60,7 +61,7 @@ bool server_decision::run(const nlohmann::ordered_json & body, nlohmann::ordered
 
     std::lock_guard<std::mutex> lock(mutex);
     common_decision_result result;
-    if (!common_decision_run(ctx, head, req, result, err)) {
+    if (!common_decision_run(ctx, head, req, result, err, &overflow)) {
         return false;
     }
 

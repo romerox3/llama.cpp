@@ -10,7 +10,6 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
-#include <regex>
 
 namespace {
 
@@ -54,11 +53,6 @@ static llama_token delimiter(const llama_vocab * vocab, const char * text) {
         throw std::runtime_error(std::string("delimiter did not resolve to one token: ") + text);
     }
     return tokens[0];
-}
-
-static std::string escape_user(const std::string & text) {
-    static const std::regex special(R"(<\|([A-Za-z0-9_]+)\|>)");
-    return std::regex_replace(text, special, "<\xC2\xA6$1\xC2\xA6>");
 }
 
 static bool read_tensor(
@@ -320,7 +314,8 @@ bool common_decision_run(
         const common_decision_head & head,
         const common_decision_request & req,
         common_decision_result & res,
-        std::string & err) {
+        std::string & err,
+        bool * overflow) {
     try {
         if (llama_pooling_type(ctx) != LLAMA_POOLING_TYPE_NONE) {
             return fail(err, "Kev decision context must use pooling NONE");
@@ -331,44 +326,43 @@ bool common_decision_run(
         if (head.max_state < 1 || head.max_row < 1) {
             return fail(err, "invalid Kev token limits");
         }
-        const uint32_t row_cap = std::min(head.max_row, llama_n_ctx_seq(ctx));
-        if (row_cap < 1) {
-            return fail(err, "invalid Kev decision context size");
-        }
         const llama_vocab * vocab = llama_model_get_vocab(llama_get_model(ctx));
-        auto state_tokens = tokenize(vocab, escape_user(req.state), false, false);
-        state_tokens.resize(std::min<size_t>(state_tokens.size(), std::min(head.max_state, row_cap) - 1));
-
-        std::vector<std::vector<llama_token>> branches;
-        std::vector<std::vector<int32_t>> option_ends;
-        std::vector<int32_t> decides;
-        size_t max_branch_tokens = 0;
+        std::vector<common_decision_encode_question> questions;
+        questions.reserve(req.questions.size());
         for (const auto & question : req.questions) {
-            std::vector<llama_token> tokens = { head.tok_question };
-            const auto instructions = tokenize(vocab, escape_user(question.instructions), false, false);
-            tokens.insert(tokens.end(), instructions.begin(), instructions.end());
-            std::vector<int32_t> ends;
-            for (const auto & option : question.options) {
-                tokens.push_back(head.tok_opt_start);
-                const auto option_tokens = tokenize(vocab, escape_user(option), false, false);
-                tokens.insert(tokens.end(), option_tokens.begin(), option_tokens.end());
-                tokens.push_back(head.tok_opt_end);
-                ends.push_back(static_cast<int32_t>(tokens.size() - 1));
-            }
-            tokens.push_back(head.tok_decide);
-            if (tokens.size() > row_cap - 1) {
-                return fail(err, "question " + question.id + " exceeds the context window (" +
-                    std::to_string(row_cap) + " tokens)");
-            }
-            max_branch_tokens = std::max(max_branch_tokens, tokens.size());
-            branches.push_back(std::move(tokens));
-            option_ends.push_back(std::move(ends));
-            decides.push_back(static_cast<int32_t>(branches.back().size() - 1));
+            questions.push_back({question.instructions, question.options});
         }
-
-        const size_t max_state_tokens = row_cap - max_branch_tokens;
-        state_tokens.resize(std::min(state_tokens.size() + 1, max_state_tokens) - 1);
-        state_tokens.insert(state_tokens.begin(), head.tok_state);
+        common_decision_encoded encoded;
+        if (!common_decision_encode(vocab, head.tok_state, head.tok_question, head.tok_opt_start, head.tok_opt_end,
+                head.tok_decide, req.state, questions, head.max_state, head.max_row, encoded, err)) {
+            // row limit overflow: the state is never cut for this, the request is rejected (422)
+            if (overflow != nullptr) {
+                *overflow = true;
+            }
+            return false;
+        }
+        const uint32_t longest = encoded.branch_sizes.empty() ? encoded.n_state :
+            encoded.n_state + *std::max_element(encoded.branch_sizes.begin(), encoded.branch_sizes.end());
+        if (longest > llama_n_ctx_seq(ctx)) {
+            if (overflow != nullptr) {
+                *overflow = true;
+            }
+            return fail(err, "state with the longest question branch is " + std::to_string(longest) +
+                " tokens but the decision context window is " + std::to_string(llama_n_ctx_seq(ctx)) + " tokens");
+        }
+        std::vector<llama_token> state_tokens(encoded.ids.begin(), encoded.ids.begin() + encoded.n_state);
+        std::vector<std::vector<llama_token>> branches(encoded.branch_sizes.size());
+        std::vector<std::vector<int32_t>> option_ends(encoded.opt_idx.size());
+        std::vector<int32_t> decides(encoded.decide_idx.size());
+        size_t offset = encoded.n_state;
+        for (size_t k = 0; k < branches.size(); ++k) {
+            branches[k].assign(encoded.ids.begin() + offset, encoded.ids.begin() + offset + encoded.branch_sizes[k]);
+            for (const int32_t idx : encoded.opt_idx[k]) {
+                option_ends[k].push_back(idx - static_cast<int32_t>(offset));
+            }
+            decides[k] = encoded.decide_idx[k] - static_cast<int32_t>(offset);
+            offset += encoded.branch_sizes[k];
+        }
 
         res = common_decision_result();
         res.n_state_tokens = static_cast<int32_t>(state_tokens.size());

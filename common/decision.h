@@ -1,5 +1,6 @@
 #pragma once
 
+#include "decision-encode.h"
 #include "llama.h"
 
 #include "nlohmann/json.hpp"
@@ -64,12 +65,14 @@ struct common_decision_result {
     double t_branches_ms = 0;
 };
 
+// overflow, when not null, is set on request rejection for token limits (422)
 bool common_decision_run(
         llama_context * ctx,
         const common_decision_head & head,
         const common_decision_request & req,
         common_decision_result & res,
-        std::string & err);
+        std::string & err,
+        bool * overflow = nullptr);
 
 nlohmann::ordered_json common_decision_answers(
         const common_decision_request & req,

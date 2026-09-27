@@ -5266,7 +5266,8 @@ void server_routes::init_routes() {
             nlohmann::ordered_json result;
             std::string err;
             if (!ctx_server.decision->run(body, result, err)) {
-                res->error(format_error_response(err, ERROR_TYPE_INVALID_REQUEST));
+                const auto type = ctx_server.decision->overflow ? ERROR_TYPE_UNPROCESSABLE : ERROR_TYPE_INVALID_REQUEST;
+                res->error(format_error_response(err, type));
                 return res;
             }
             const std::string model = meta->model_name;

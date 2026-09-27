@@ -76,6 +76,10 @@ add_library(${TARGET}
     decision.h
     decision-answers.cpp
     decision-answers.h
+    decision-encode.cpp
+    decision-encode.h
+    decision-nfc-data.cpp
+    decision-nfc-data.h
     console.cpp
     console.h
     debug.cpp
