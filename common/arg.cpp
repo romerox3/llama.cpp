@@ -3559,6 +3559,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--kev-batch"}, "N",
+        string_format("Kev decision context: serve up to N queued systemone requests in one model pass, 1 = one by one (default: %u)", params.kev_batch),
+        [](common_params & params, int value) {
+            params.kev_batch = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--kev-pad-branches"},
+        "Kev decision context: sort branches by length and pad them to one length per round (default: disabled)",
+        [](common_params & params) {
+            params.kev_pad_branches = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--kev-prefix-cache"}, "P",
         string_format("Kev decision context: keep up to P decoded states across requests, 0 = off (default: %u)", params.kev_prefix_cache),
         [](common_params & params, int value) {

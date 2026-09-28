@@ -516,6 +516,8 @@ struct common_params {
     bool        kev_unified          = false;    // Kev decision context: one shared KV stream                 // NOLINT
     uint32_t    kev_seq_max          = 4;        // Kev decision context: sequences (state + branches)         // NOLINT
     uint32_t    kev_ubatch           = 512;      // Kev decision context: physical batch size                  // NOLINT
+    uint32_t    kev_batch            = 1;        // Kev decision context: requests per model pass, 1 = one by one // NOLINT
+    bool        kev_pad_branches     = false;    // Kev decision context: sort branches by length and pad each round // NOLINT
     uint32_t    kev_prefix_cache     = 0;        // Kev decision context: cached states, 0 = off               // NOLINT
     uint32_t    kev_prefix_max_tokens = 65536;   // Kev prefix cache: total state tokens it holds              // NOLINT
     std::string prompt               = "";                                                                  // NOLINT

@@ -139,6 +139,30 @@ bool common_decision_run(
         std::string & err,
         common_decision_prefix_cache * cache = nullptr);
 
+// one request inside a batch run; the caller owns req and res
+struct common_decision_batch_item {
+    const common_decision_request * req = nullptr;
+    common_decision_result * res = nullptr;
+    std::string err;
+    bool ok = false;
+};
+
+// run several requests with shared llama_decode calls: states that are not cached
+// decode together (one sequence each, split across decodes when they do not fit
+// n_batch), branches of all requests share the remaining sequences round by round.
+// With pad_branches the branches are sorted by length and every branch of a round
+// is filled up to the round's longest branch with tokens after <decide>; the model
+// is causal, so the read positions do not move. A failing request does not stop
+// the others; err is set and false returned only when no item could run. With one
+// item it behaves like common_decision_run.
+bool common_decision_run_batch(
+        llama_context * ctx,
+        const common_decision_head & head,
+        std::vector<common_decision_batch_item> & items,
+        std::string & err,
+        common_decision_prefix_cache * cache = nullptr,
+        bool pad_branches = false);
+
 nlohmann::ordered_json common_decision_answers(
         const common_decision_request & req,
         const common_decision_result & res);

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <memory>
 #include <numeric>
+#include <utility>
 
 namespace {
 
@@ -35,6 +36,7 @@ int64_t tokenize_count(const llama_vocab * vocab, const std::string & text) {
 } // namespace
 
 server_decision::~server_decision() {
+    stop_owner();
     llama_free(ctx);
 }
 
@@ -73,6 +75,12 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
         err = "--kev-ubatch must be at least 1";
         return false;
     }
+    if (params.kev_batch == 0) {
+        err = "--kev-batch must be at least 1";
+        return false;
+    }
+    batch_max = params.kev_batch;
+    pad_branches = params.kev_pad_branches;
 
     auto cparams = common_context_params_to_llama(params);
     cparams.n_seq_max = seq_max;
@@ -120,6 +128,9 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
 
     SRV_INF("Kev decision context: %u rows x %u tokens%s\n", llama_n_seq_max(ctx), llama_n_ctx_seq(ctx),
         params.kev_unified ? ", unified KV" : "");
+
+    // only this thread touches the context and the prefix cache from now on
+    owner = std::thread([this] { owner_loop(); });
     return true;
 }
 
@@ -133,25 +144,91 @@ bool server_decision::parse(const nlohmann::ordered_json & body, common_decision
 }
 
 bool server_decision::answer(const common_decision_request & req, server_decision_answer & out, std::string & err) {
-    std::lock_guard<std::mutex> lock(mutex);
-    common_decision_result result;
-    if (!common_decision_run(ctx, head, req, result, err, prefix_cache.get())) {
+    auto job = std::make_shared<server_decision_job>();
+    job->req = req;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        if (stopping) {
+            err = "server is shutting down";
+            return false;
+        }
+        queue.push_back(job);
+    }
+    queue_cv.notify_one();
+    if (!job->done.get_future().get()) {
+        err = std::move(job->err);
         return false;
     }
-    if (prefix_cache) {
-        SRV_INF("systemone: %zu questions, prefix cache %s (entries %u, hits %llu, misses %llu)\n",
-            req.questions.size(), result.prefix_cache_hit ? "hit" : "miss",
-            (unsigned) prefix_cache->count(), (unsigned long long) prefix_cache->hits,
-            (unsigned long long) prefix_cache->misses);
-    }
-
-    out = server_decision_answer();
-    out.answers = common_decision_answers(req, result);
-    out.input_tokens = result.n_state_tokens +
-        std::accumulate(result.n_branch_tokens.begin(), result.n_branch_tokens.end(), 0);
-    out.output_tokens = tokenize_count(vocab, kev_json_dumps(out.answers));
-    out.latency_ms = std::round((result.t_state_ms + result.t_branches_ms) * 10.0) / 10.0;
+    out = std::move(job->out);
     return true;
+}
+
+void server_decision::owner_loop() {
+    for (;;) {
+        std::vector<std::shared_ptr<server_decision_job>> group;
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            queue_cv.wait(lock, [this] { return stopping || !queue.empty(); });
+            if (queue.empty()) {
+                return; // stopping with nothing left to run
+            }
+            while (!queue.empty() && group.size() < batch_max) {
+                group.push_back(std::move(queue.front()));
+                queue.pop_front();
+            }
+        }
+        for (auto & job : group) {
+            job->out = server_decision_answer();
+        }
+        std::vector<common_decision_batch_item> items(group.size());
+        std::vector<common_decision_result> results(group.size());
+        for (size_t i = 0; i < group.size(); ++i) {
+            items[i].req = &group[i]->req;
+            items[i].res = &results[i];
+        }
+        std::string batch_err;
+        common_decision_run_batch(ctx, head, items, batch_err, prefix_cache.get(), pad_branches);
+        for (size_t i = 0; i < group.size(); ++i) {
+            auto & job = group[i];
+            if (!items[i].ok) {
+                job->err = items[i].err.empty() ? batch_err : items[i].err;
+                job->done.set_value(false);
+                continue;
+            }
+            const common_decision_result & result = results[i];
+            job->out.answers = common_decision_answers(job->req, result);
+            job->out.input_tokens = result.n_state_tokens +
+                std::accumulate(result.n_branch_tokens.begin(), result.n_branch_tokens.end(), 0);
+            job->out.output_tokens = tokenize_count(vocab, kev_json_dumps(job->out.answers));
+            job->out.latency_ms = std::round((result.t_state_ms + result.t_branches_ms) * 10.0) / 10.0;
+            if (prefix_cache) {
+                SRV_INF("systemone: %zu questions, prefix cache %s (entries %u, hits %llu, misses %llu)\n",
+                    job->req.questions.size(), result.prefix_cache_hit ? "hit" : "miss",
+                    (unsigned) prefix_cache->count(), (unsigned long long) prefix_cache->hits,
+                    (unsigned long long) prefix_cache->misses);
+            }
+            job->done.set_value(true);
+        }
+    }
+}
+
+void server_decision::stop_owner() {
+    if (!owner.joinable()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        stopping = true;
+    }
+    queue_cv.notify_all();
+    owner.join();
+    // anything still queued never reaches the model: fail it so no caller hangs
+    while (!queue.empty()) {
+        auto job = queue.front();
+        queue.pop_front();
+        job->err = "server is shutting down";
+        job->done.set_value(false);
+    }
 }
 
 int64_t server_decision::token_count(const std::string & text) const {
