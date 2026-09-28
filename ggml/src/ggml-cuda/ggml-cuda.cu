@@ -3289,6 +3289,16 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
             add = cgraph->nodes[node_idx+2];
         }
 
+        if (ops.size() == 3 && ops.begin()[2] == GGML_OP_CPY) {
+            // rms_norm * mul cast to F16: the copy must be a plain contiguous F32 -> F16 conversion of the product
+            const ggml_tensor * cpy = cgraph->nodes[node_idx+2];
+            if (cpy->src[0] != mul || cpy->type != GGML_TYPE_F16 || mul->type != GGML_TYPE_F32 ||
+                !ggml_is_contiguous(mul) || !ggml_is_contiguous(cpy) || !ggml_are_same_shape(mul, cpy) ||
+                rms_norm != mul->src[0] || !ggml_are_same_shape(mul, rms_norm)) {
+                return false;
+            }
+        }
+
         GGML_ASSERT(rms_norm->src[0]->type == GGML_TYPE_F32);
         GGML_ASSERT(rms_norm->type == GGML_TYPE_F32);
 
@@ -4154,6 +4164,13 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD }, {})) {
         ggml_cuda_op_rms_norm_fused_add(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
+        return 2;
+    }
+
+    // experiment: GGML_CUDA_FUSE_NORM_F16=1 fuses a contiguous F32 -> F16 copy of rms_norm * mul into the norm kernel
+    static const bool fuse_norm_f16 = getenv("GGML_CUDA_FUSE_NORM_F16") != nullptr;
+    if (fuse_norm_f16 && ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_CPY }, {})) {
+        ggml_cuda_op_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
         return 2;
     }
 
