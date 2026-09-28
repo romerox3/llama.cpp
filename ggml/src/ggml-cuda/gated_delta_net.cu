@@ -220,6 +220,16 @@ static void launch_gated_delta_net(
     }
 }
 
+// experiment: GGML_CUDA_GDN_CHUNK_MIN_TOKENS lowers the per-sequence token count from which the chunked
+// kernel is used (default 128, tuned upstream on Ampere)
+static int gdn_chunk_min_tokens() {
+    static const int v = [] {
+        const char * e = getenv("GGML_CUDA_GDN_CHUNK_MIN_TOKENS");
+        return e != nullptr && atoi(e) > 0 ? atoi(e) : 128;
+    }();
+    return v;
+}
+
 // Shape-only half of the chunked predicate, split out because the buffer-type get_alloc_size hook
 // has to size the chunked scratch. That sizing must NOT depend on which device is current: deciding
 // from shape alone can only over-allocate on a device that ends up ineligible, never under-allocate
@@ -253,7 +263,7 @@ bool ggml_cuda_gdn_chunked_shape_eligible(const ggml_tensor * dst) {
     return !kda && K == 1
         && neq0 == 128 && S_v == 128 && nev1 % neq1 == 0
         && src_k->ne[1] == neq1
-        && n_tokens >= 128
+        && n_tokens >= gdn_chunk_min_tokens()
         && ggml_is_contiguous(src_q) && ggml_is_contiguous(src_k) && ggml_is_contiguous(src_g)
         && src_v->nb[0] == ggml_type_size(src_v->type) && src_v->nb[1] == (size_t)S_v * ggml_type_size(src_v->type)
         && src_v->nb[3] == (size_t) n_tokens * src_v->nb[2]

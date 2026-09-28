@@ -11065,6 +11065,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, 256, 1, /*v_repeat=*/2));
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, 512, 1, /*v_repeat=*/3));
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, 256, 4, /*v_repeat=*/2));
+    // short Kev-like branches, which GGML_CUDA_GDN_CHUNK_MIN_TOKENS can route to the chunked kernel
+    test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, 33, 4, /*v_repeat=*/2));
+    test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, 64, 4, /*v_repeat=*/2));
+    test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, 70, 16, /*v_repeat=*/2));
     // Partial final chunk (T not multiple of CS=16)
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 129, 1));
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 143, 1));
@@ -11569,6 +11573,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 256, 1)); // PP-256
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 512, 1)); // PP-512
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1024, 1)); // PP-1024
+    // Kev branch rounds on Qwen3.5-9B: 16 key heads, 32 value heads, d=128, many short sequences
+    for (int64_t n_seqs : {1, 16}) {
+        for (int64_t n_tok : {16, 32, 48, 64, 96, 128}) {
+            test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, n_tok, n_seqs, /*v_repeat=*/2));
+        }
+    }
     // Small model configs (fewer heads = less GPU occupancy for autoregressive)
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 4, 128, 64, 1));   // 4h PP-64
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 4, 128, 256, 1));  // 4h PP-256
