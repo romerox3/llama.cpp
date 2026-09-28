@@ -233,7 +233,9 @@ llama_context::llama_context(
     cparams.auto_fa    = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
 
     cparams.fused_gdn_ar = true;
-    cparams.fused_gdn_ch = true;
+    // experiment: LLAMA_KEV_GDN_GRAPH_CHUNK=1 builds the chunked delta net from generic ops
+    // instead of the fused recurrent kernel (sm_70 has no fused chunked kernel)
+    cparams.fused_gdn_ch = getenv("LLAMA_KEV_GDN_GRAPH_CHUNK") == nullptr;
     cparams.auto_fgdn    = false;
 
     cparams.fused_lid = true;

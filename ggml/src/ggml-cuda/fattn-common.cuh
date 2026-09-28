@@ -1109,7 +1109,10 @@ void launch_fattn(
     // Optional optimization where the mask is scanned to determine whether part of the calculation can be skipped.
     // Only worth the overhead if there is at lease one FATTN_KQ_STRIDE x FATTN_KQ_STRIDE square to be skipped or
     //     multiple sequences of possibly different lengths.
-    if (!use_sparse && mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
+    // experiment: GGML_CUDA_FA_KV_MAX_ALWAYS=1 also trims the tail for small batches, which with a
+    // unified KV cache otherwise scan every resident cell
+    static const bool kv_max_always = getenv("GGML_CUDA_FA_KV_MAX_ALWAYS") != nullptr;
+    if (!use_sparse && mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (kv_max_always || Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
         const int64_t s31 = mask->nb[1] / sizeof(half2);
         const int64_t s33 = mask->nb[3] / sizeof(half2);
 
