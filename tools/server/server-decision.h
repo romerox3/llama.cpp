@@ -42,5 +42,6 @@ private:
     const llama_vocab * vocab = nullptr;
     bool date_facts = false;
     llama_context * ctx = nullptr;
+    std::unique_ptr<common_decision_prefix_cache> prefix_cache;
     std::mutex mutex;
 };

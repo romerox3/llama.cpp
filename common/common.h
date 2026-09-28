@@ -513,6 +513,11 @@ struct common_params {
     bool        kev_date_facts       = false; // append computed date facts to the request state             // NOLINT
     bool kev_skip_lm_head            = false; // Kev decision context: skip the LM head graph               // NOLINT
     bool kev_masked_outputs          = false; // Kev decision context: embeddings only for marked tokens     // NOLINT
+    bool        kev_unified          = false;    // Kev decision context: one shared KV stream                 // NOLINT
+    uint32_t    kev_seq_max          = 4;        // Kev decision context: sequences (state + branches)         // NOLINT
+    uint32_t    kev_ubatch           = 512;      // Kev decision context: physical batch size                  // NOLINT
+    uint32_t    kev_prefix_cache     = 0;        // Kev decision context: cached states, 0 = off               // NOLINT
+    uint32_t    kev_prefix_max_tokens = 65536;   // Kev prefix cache: total state tokens it holds              // NOLINT
     std::string prompt               = "";                                                                  // NOLINT
     std::string system_prompt        = "";                                                                  // NOLINT
     std::string prompt_file          = ""; // store the external prompt file name                           // NOLINT

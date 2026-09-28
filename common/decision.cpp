@@ -135,12 +135,79 @@ static void batch_add(
     batch.logits[index] = output ? 1 : 0;
 }
 
-static void clear_sequences(llama_memory_t memory, uint32_t n_seq_max) {
-    for (uint32_t i = 0; i < n_seq_max; ++i) {
-        llama_memory_seq_rm(memory, static_cast<llama_seq_id>(i), -1, -1);
+}
+
+//
+// common_decision_prefix_cache
+//
+
+common_decision_prefix_cache::common_decision_prefix_cache(uint32_t capacity, uint64_t max_tokens) :
+    cap(capacity), max_tok(max_tokens) {}
+
+int32_t common_decision_prefix_cache::find(const std::vector<llama_token> & ids) {
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i].ids == ids) {
+            const entry hit = entries[i];
+            entries.erase(entries.begin() + i);
+            entries.push_back(hit); // refresh as most recently used
+            ++hits;
+            return hit.slot;
+        }
+    }
+    ++misses;
+    return -1;
+}
+
+int32_t common_decision_prefix_cache::take_for_store() {
+    if (cap == 0) {
+        return -1;
+    }
+    if (entries.size() < cap) {
+        for (uint32_t s = 0; s < cap; ++s) {
+            bool used = false;
+            for (const auto & e : entries) {
+                used |= e.slot == static_cast<int32_t>(s);
+            }
+            if (!used) {
+                return static_cast<int32_t>(s);
+            }
+        }
+    }
+    // recycle the LRU slot: the entry goes now, before the caller wipes the slot,
+    // so a failed request cannot leave an entry pointing at emptied memory
+    const int32_t slot = entries.front().slot;
+    entries.erase(entries.begin());
+    return slot;
+}
+
+void common_decision_prefix_cache::store(llama_memory_t memory, const std::vector<llama_token> & ids, int32_t slot) {
+    for (size_t i = 0; i < entries.size();) {
+        if (entries[i].slot != slot && entries[i].ids != ids) {
+            ++i;
+            continue;
+        }
+        if (entries[i].slot != slot) {
+            llama_memory_seq_rm(memory, entries[i].slot, -1, -1);
+        }
+        entries.erase(entries.begin() + i);
+    }
+    entries.push_back({ids, slot});
+    uint64_t tokens = 0;
+    for (const auto & e : entries) {
+        tokens += e.ids.size();
+    }
+    while (!entries.empty() && (entries.size() > cap || tokens > max_tok)) {
+        llama_memory_seq_rm(memory, entries.front().slot, -1, -1);
+        tokens -= entries.front().ids.size();
+        entries.erase(entries.begin());
     }
 }
 
+void common_decision_prefix_cache::clear(llama_memory_t memory) {
+    for (const auto & e : entries) {
+        llama_memory_seq_rm(memory, e.slot, -1, -1);
+    }
+    entries.clear();
 }
 
 // dot product with 8 partial sums so the loop vectorizes without reassociation
@@ -379,12 +446,25 @@ bool common_decision_load_json(
     }
 }
 
-bool common_decision_run(
+static bool common_decision_run_once(
         llama_context * ctx,
         const common_decision_head & head,
         const common_decision_request & req,
         common_decision_result & res,
-        std::string & err) {
+        std::string & err,
+        common_decision_prefix_cache * cache) {
+    uint32_t state_seq = 0;
+    int32_t store_slot = -1;
+    auto cleanup = [&](bool release_store_slot) {
+        llama_memory_t memory = llama_get_memory(ctx);
+        // reserved cache slots survive; a slot borrowed for a state that was never stored is released
+        for (uint32_t i = cache ? cache->capacity() : 0; i < llama_n_seq_max(ctx); ++i) {
+            llama_memory_seq_rm(memory, static_cast<llama_seq_id>(i), -1, -1);
+        }
+        if (release_store_slot && store_slot >= 0) {
+            llama_memory_seq_rm(memory, store_slot, -1, -1);
+        }
+    };
     try {
         if (llama_pooling_type(ctx) != LLAMA_POOLING_TYPE_NONE) {
             return fail(err, "Kev decision context must use pooling NONE");
@@ -435,30 +515,58 @@ bool common_decision_run(
         res.probs.resize(branches.size());
         llama_memory_t memory = llama_get_memory(ctx);
         const uint32_t n_seq_max = llama_n_seq_max(ctx);
-        clear_sequences(memory, n_seq_max);
+        const uint32_t n_slots = cache ? cache->capacity() : 0;
+        if (n_slots > 0 && n_seq_max < n_slots + 2) {
+            return fail(err, "Kev prefix cache needs two sequences besides the cached states");
+        }
+        for (uint32_t i = n_slots; i < n_seq_max; ++i) {
+            llama_memory_seq_rm(memory, static_cast<llama_seq_id>(i), -1, -1);
+        }
+        // a state fits the cache when its ids, state delimiter included, are within the token budget
+        const bool cacheable = cache != nullptr && n_slots > 0 && state_tokens.size() <= cache->max_tokens();
+        const int32_t hit_slot = cacheable ? cache->find(state_tokens) : -1;
+        state_seq = n_slots;
         // masked mode: the state prefill produces no outputs, only cache rows for the branches
         const bool masked = llama_get_embeddings_masked(ctx);
-        llama_batch state_batch = llama_batch_init(static_cast<int32_t>(state_tokens.size()), 0, 1);
-        for (size_t i = 0; i < state_tokens.size(); ++i) {
-            batch_add(state_batch, static_cast<int32_t>(i), state_tokens[i], static_cast<llama_pos>(i), 0, !masked);
-        }
-        state_batch.n_tokens = static_cast<int32_t>(state_tokens.size());
-        const auto state_start = std::chrono::steady_clock::now();
-        const int state_rc = llama_decode(ctx, state_batch);
-        const auto state_end = std::chrono::steady_clock::now();
-        res.t_state_ms = std::chrono::duration<double, std::milli>(state_end - state_start).count();
-        llama_batch_free(state_batch);
-        if (state_rc != 0) {
-            clear_sequences(memory, n_seq_max);
-            return fail(err, "state decode failed");
+        if (hit_slot >= 0) {
+            // the cached state is reused as is: no state decode, the branches copy its sequence
+            state_seq = static_cast<uint32_t>(hit_slot);
+            res.prefix_cache_hit = true;
+        } else {
+            if (cacheable) {
+                // decode into the taken slot; on success it becomes the home of this state.
+                // take_for_store drops the LRU entry up front, so the slot is unreferenced
+                // while its old state is being replaced
+                store_slot = cache->take_for_store();
+                llama_memory_seq_rm(memory, store_slot, -1, -1);
+                state_seq = static_cast<uint32_t>(store_slot);
+            }
+            llama_batch state_batch = llama_batch_init(static_cast<int32_t>(state_tokens.size()), 0, 1);
+            for (size_t i = 0; i < state_tokens.size(); ++i) {
+                batch_add(state_batch, static_cast<int32_t>(i), state_tokens[i], static_cast<llama_pos>(i),
+                    static_cast<llama_seq_id>(state_seq), !masked);
+            }
+            state_batch.n_tokens = static_cast<int32_t>(state_tokens.size());
+            const auto state_start = std::chrono::steady_clock::now();
+            const int state_rc = llama_decode(ctx, state_batch);
+            const auto state_end = std::chrono::steady_clock::now();
+            res.t_state_ms = std::chrono::duration<double, std::milli>(state_end - state_start).count();
+            llama_batch_free(state_batch);
+            if (state_rc != 0) {
+                cleanup(true);
+                return fail(err, "state decode failed");
+            }
         }
 
-        if (n_seq_max < 2) {
-            clear_sequences(memory, n_seq_max);
+        // branches start after the state sequence, or after the reserved cache slots when the
+        // state itself lives in one of them
+        const uint32_t branch_begin = state_seq >= n_slots ? state_seq + 1 : n_slots;
+        if (n_seq_max < branch_begin + 1) {
+            cleanup(true);
             return fail(err, "Kev decision context needs at least two sequences");
         }
         const uint32_t n_batch = llama_n_batch(ctx);
-        const size_t chunk_size = n_seq_max - 1;
+        const size_t chunk_size = n_seq_max - branch_begin;
         const auto branch_start = std::chrono::steady_clock::now();
         for (size_t base = 0; base < branches.size();) {
             size_t count = 0;
@@ -466,7 +574,7 @@ bool common_decision_run(
             while (base + count < branches.size() && count < chunk_size) {
                 const size_t branch_tokens = branches[base + count].size();
                 if (branch_tokens > n_batch) {
-                    clear_sequences(memory, n_seq_max);
+                    cleanup(true);
                     return fail(err, "question " + req.questions[base + count].id +
                         " exceeds the batch size (" + std::to_string(n_batch) + " tokens)");
                 }
@@ -477,7 +585,10 @@ bool common_decision_run(
                 ++count;
             }
             for (size_t i = 0; i < count; ++i) {
-                llama_memory_seq_cp(memory, 0, static_cast<llama_seq_id>(i + 1), -1, -1);
+                const llama_seq_id seq = static_cast<llama_seq_id>(branch_begin + i);
+                // shared unified cells: stale branch cells must be released before the copy
+                llama_memory_seq_rm(memory, seq, -1, -1);
+                llama_memory_seq_cp(memory, static_cast<llama_seq_id>(state_seq), seq, -1, -1);
             }
             llama_batch batch = llama_batch_init(static_cast<int32_t>(total_tokens), 0, 1);
             size_t index = 0;
@@ -491,14 +602,15 @@ bool common_decision_run(
                         std::find(option_ends[base + i].begin(), option_ends[base + i].end(),
                             static_cast<int32_t>(j)) != option_ends[base + i].end();
                     batch_add(batch, static_cast<int32_t>(index++), branches[base + i][j],
-                        static_cast<llama_pos>(state_tokens.size() + j), static_cast<llama_seq_id>(i + 1), output);
+                        static_cast<llama_pos>(state_tokens.size() + j), static_cast<llama_seq_id>(branch_begin + i),
+                        output);
                 }
             }
             batch.n_tokens = static_cast<int32_t>(index);
             const int rc = llama_decode(ctx, batch);
             if (rc != 0) {
                 llama_batch_free(batch);
-                clear_sequences(memory, n_seq_max);
+                cleanup(true);
                 return fail(err, "branch decode failed");
             }
             for (size_t i = 0; i < count; ++i) {
@@ -507,7 +619,7 @@ bool common_decision_run(
                     float * embedding = llama_get_embeddings_ith(ctx, static_cast<int32_t>(offsets[i] + position));
                     if (embedding == nullptr) {
                         llama_batch_free(batch);
-                        clear_sequences(memory, n_seq_max);
+                        cleanup(true);
                         return fail(err, "decision context was not created with embeddings enabled");
                     }
                     options.push_back(embedding);
@@ -515,7 +627,7 @@ bool common_decision_run(
                 float * decide = llama_get_embeddings_ith(ctx, static_cast<int32_t>(offsets[i] + decides[base + i]));
                 if (decide == nullptr) {
                     llama_batch_free(batch);
-                    clear_sequences(memory, n_seq_max);
+                    cleanup(true);
                     return fail(err, "decision context was not created with embeddings enabled");
                 }
                 const auto head_start = std::chrono::steady_clock::now();
@@ -528,12 +640,42 @@ bool common_decision_run(
         const auto branch_end = std::chrono::steady_clock::now();
         res.t_branches_ms = std::chrono::duration<double, std::milli>(branch_end - branch_start).count();
         res.t_head_ms = head_ms;
-        clear_sequences(memory, n_seq_max);
+        if (store_slot >= 0) {
+            cache->store(memory, state_tokens, store_slot);
+        }
+        cleanup(false);
         return true;
     } catch (const std::exception & e) {
-        clear_sequences(llama_get_memory(ctx), llama_n_seq_max(ctx));
+        cleanup(true);
         return fail(err, e.what());
     }
+}
+
+bool common_decision_run(
+        llama_context * ctx,
+        const common_decision_head & head,
+        const common_decision_request & req,
+        common_decision_result & res,
+        std::string & err,
+        common_decision_prefix_cache * cache) {
+    if (common_decision_run_once(ctx, head, req, res, err, cache)) {
+        return true;
+    }
+    if (cache != nullptr && !cache->empty()) {
+        // the context could not fit the request next to the cached states: drop them and retry once
+        const uint32_t n_slots = cache->capacity();
+        llama_memory_t memory = llama_get_memory(ctx);
+        for (uint32_t i = 0; i < n_slots; ++i) {
+            llama_memory_seq_rm(memory, static_cast<llama_seq_id>(i), -1, -1);
+        }
+        cache->clear(memory);
+        for (uint32_t i = 0; i < llama_n_seq_max(ctx); ++i) {
+            llama_memory_seq_rm(memory, static_cast<llama_seq_id>(i), -1, -1);
+        }
+        res = common_decision_result();
+        return common_decision_run_once(ctx, head, req, res, err, cache);
+    }
+    return false;
 }
 
 nlohmann::ordered_json common_decision_answers(

@@ -77,6 +77,58 @@ struct common_decision_result {
     double t_state_ms = 0;
     double t_branches_ms = 0;
     double t_head_ms = 0;
+    bool prefix_cache_hit = false;
+};
+
+// LRU cache of decoded decision states, kept in reserved sequences of the decision context.
+// The key is the exact token ids of the state, state delimiter included. At most `capacity`
+// states and `max_tokens` state tokens are held; the least recently used one is evicted first
+// and a state longer than max_tokens is not cached.
+class common_decision_prefix_cache {
+public:
+    common_decision_prefix_cache(uint32_t capacity, uint64_t max_tokens);
+
+    uint32_t capacity() const {
+        return cap;
+    }
+
+    uint64_t max_tokens() const {
+        return max_tok;
+    }
+
+    uint32_t count() const {
+        return entries.size();
+    }
+
+    bool empty() const {
+        return entries.empty();
+    }
+
+    // sequence that holds the state, or -1 when not cached; refreshes LRU on a hit and counts it
+    int32_t find(const std::vector<llama_token> & ids);
+
+    // slot for a state that is about to be decoded: a free slot, or the LRU entry's
+    // slot with that entry dropped, so no entry ever outlives its state
+    int32_t take_for_store();
+
+    // remember the state now living in `slot`; evicts LRU entries until the bounds hold
+    void store(llama_memory_t memory, const std::vector<llama_token> & ids, int32_t slot);
+
+    // drop everything and release the reserved sequences
+    void clear(llama_memory_t memory);
+
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+
+private:
+    struct entry {
+        std::vector<llama_token> ids;
+        int32_t slot = -1;
+    };
+
+    uint32_t cap = 0;
+    uint64_t max_tok = 0;
+    std::vector<entry> entries; // front = least recently used
 };
 
 bool common_decision_run(
@@ -84,7 +136,8 @@ bool common_decision_run(
         const common_decision_head & head,
         const common_decision_request & req,
         common_decision_result & res,
-        std::string & err);
+        std::string & err,
+        common_decision_prefix_cache * cache = nullptr);
 
 nlohmann::ordered_json common_decision_answers(
         const common_decision_request & req,

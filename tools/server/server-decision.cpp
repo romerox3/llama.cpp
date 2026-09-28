@@ -59,17 +59,50 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
         return false;
     }
 
+    const uint32_t seq_max = params.kev_seq_max;
+    const uint32_t n_slots = params.kev_prefix_cache;
+    if (seq_max < 2 || seq_max > 256) {
+        err = "--kev-seq-max must be between 2 and 256";
+        return false;
+    }
+    if (n_slots > 0 && seq_max < n_slots + 2) {
+        err = "--kev-prefix-cache needs --kev-seq-max of at least " + std::to_string(n_slots + 2);
+        return false;
+    }
+    if (params.kev_ubatch == 0) {
+        err = "--kev-ubatch must be at least 1";
+        return false;
+    }
+
     auto cparams = common_context_params_to_llama(params);
-    cparams.n_ctx = 4 * row_cap;
+    cparams.n_seq_max = seq_max;
+    if (params.kev_unified) {
+        // one shared KV stream: cells for the cached states plus the state and one branch chunk
+        const uint32_t state_cap = std::min(head.max_state, row_cap);
+        const uint64_t cache_cap = n_slots > 0 ?
+            std::min<uint64_t>(static_cast<uint64_t>(n_slots) * state_cap, params.kev_prefix_max_tokens) : 0;
+        const uint32_t branches = seq_max - (n_slots > 0 ? n_slots : 1);
+        const uint64_t chunk_cap = std::min<uint64_t>(row_cap, static_cast<uint64_t>(branches) * (row_cap - 1));
+        const uint64_t n_ctx = cache_cap + state_cap + chunk_cap;
+        if (n_ctx > UINT32_MAX) {
+            err = "Kev decision context size overflows";
+            return false;
+        }
+        cparams.n_ctx = static_cast<uint32_t>(n_ctx);
+    } else {
+        cparams.n_ctx = seq_max * row_cap;
+    }
     cparams.n_batch = row_cap;
-    const uint32_t ubatch = params.n_ubatch > 0 ? params.n_ubatch : 512;
-    cparams.n_ubatch = std::min<uint32_t>(row_cap, std::min<uint32_t>(512, ubatch));
-    cparams.n_seq_max = 4;
+    cparams.n_ubatch = std::min<uint32_t>(row_cap, params.kev_ubatch);
     cparams.n_outputs_max = 0;
     cparams.n_outputs_max_per_seq = 1;
     cparams.embeddings = true;
     cparams.pooling_type = LLAMA_POOLING_TYPE_NONE;
-    cparams.kv_unified = false;
+    cparams.kv_unified = params.kev_unified;
+
+    if (n_slots > 0) {
+        prefix_cache = std::make_unique<common_decision_prefix_cache>(n_slots, params.kev_prefix_max_tokens);
+    }
 
     ctx = llama_init_from_model(model, cparams);
     if (ctx == nullptr) {
@@ -85,7 +118,8 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
         llama_set_embeddings_masked(ctx, true);
     }
 
-    SRV_INF("Kev decision context: %u rows x %u tokens\n", llama_n_seq_max(ctx), llama_n_ctx_seq(ctx));
+    SRV_INF("Kev decision context: %u rows x %u tokens%s\n", llama_n_seq_max(ctx), llama_n_ctx_seq(ctx),
+        params.kev_unified ? ", unified KV" : "");
     return true;
 }
 
@@ -101,8 +135,14 @@ bool server_decision::parse(const nlohmann::ordered_json & body, common_decision
 bool server_decision::answer(const common_decision_request & req, server_decision_answer & out, std::string & err) {
     std::lock_guard<std::mutex> lock(mutex);
     common_decision_result result;
-    if (!common_decision_run(ctx, head, req, result, err)) {
+    if (!common_decision_run(ctx, head, req, result, err, prefix_cache.get())) {
         return false;
+    }
+    if (prefix_cache) {
+        SRV_INF("systemone: %zu questions, prefix cache %s (entries %u, hits %llu, misses %llu)\n",
+            req.questions.size(), result.prefix_cache_hit ? "hit" : "miss",
+            (unsigned) prefix_cache->count(), (unsigned long long) prefix_cache->hits,
+            (unsigned long long) prefix_cache->misses);
     }
 
     out = server_decision_answer();

@@ -3538,6 +3538,41 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--kev-unified"},
+        "Kev decision context: one shared KV cache stream for state, branches and cached states (default: disabled)",
+        [](common_params & params) {
+            params.kev_unified = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--kev-seq-max"}, "N",
+        string_format("Kev decision context: number of sequences, one for the state plus branches (default: %u)", params.kev_seq_max),
+        [](common_params & params, int value) {
+            params.kev_seq_max = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--kev-ubatch"}, "N",
+        string_format("Kev decision context: physical batch size (default: %u)", params.kev_ubatch),
+        [](common_params & params, int value) {
+            params.kev_ubatch = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--kev-prefix-cache"}, "P",
+        string_format("Kev decision context: keep up to P decoded states across requests, 0 = off (default: %u)", params.kev_prefix_cache),
+        [](common_params & params, int value) {
+            params.kev_prefix_cache = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--kev-prefix-max-tokens"}, "T",
+        string_format("Kev prefix cache: total state tokens it holds, LRU evicted first; a longer state is not cached (default: %u)", params.kev_prefix_max_tokens),
+        [](common_params & params, int value) {
+            params.kev_prefix_max_tokens = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--api-key-file"}, "FNAME",
         "path to file containing API keys, one per line; lines starting with a hash are treated as comments (default: none)",
         [](common_params & params, const std::string & value) {
