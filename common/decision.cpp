@@ -751,6 +751,47 @@ bool batch_prepare(
     return true;
 }
 
+// partition the states of a wave, sorted by length, into groups that each decode as one padded ubatch:
+// minimises sum over groups of (fixed cost + padded tokens), where the fixed cost of a ubatch (the whole
+// model runs once per ubatch) is KEV_PAD_GROUP_COST tokens (default 192, from V100 timings) and a group
+// must fit n_batch; a state that does not fit on its own is a group of one and decodes unpadded
+std::vector<std::vector<size_t>> pad_state_groups(
+        const std::vector<batch_item_data> & data,
+        std::vector<size_t> todo,
+        uint32_t n_batch) {
+    static const double fixed = [] {
+        const char * e = getenv("KEV_PAD_GROUP_COST");
+        return e != nullptr && atof(e) >= 0 ? atof(e) : 192.0;
+    }();
+    std::stable_sort(todo.begin(), todo.end(), [&](size_t a, size_t b) {
+        return data[a].state_tokens.size() < data[b].state_tokens.size();
+    });
+    const size_t n = todo.size();
+    std::vector<double> best(n + 1, 0.0);
+    std::vector<size_t> cut(n + 1, 0);
+    for (size_t i = 1; i <= n; ++i) {
+        best[i] = -1.0;
+        const size_t longest = data[todo[i - 1]].state_tokens.size();
+        for (size_t j = i; j-- > 0;) {
+            const size_t count = i - j;
+            if (count > 1 && count * longest > n_batch) {
+                break;
+            }
+            const double cost = best[j] + fixed + static_cast<double>(count * longest);
+            if (best[i] < 0.0 || cost < best[i]) {
+                best[i] = cost;
+                cut[i] = j;
+            }
+        }
+    }
+    std::vector<std::vector<size_t>> groups;
+    for (size_t i = n; i > 0; i = cut[i]) {
+        groups.emplace_back(todo.begin() + cut[i], todo.begin() + i);
+    }
+    std::reverse(groups.begin(), groups.end());
+    return groups;
+}
+
 // KEV_TIMING=1: host-side phase times of batch_attempt, logged once per call
 struct kev_timing {
     bool on = getenv("KEV_TIMING") != nullptr;
@@ -841,64 +882,64 @@ bool batch_attempt(
         ++tm.waves;
         bool ok = true;
         {
-            // padded states: the hybrid memory splits a batch into one ubatch per distinct remaining
-            // length, and each ubatch runs the whole model; padding the states of the wave to the
-            // longest one makes a single ubatch. The padding is neutral in the recurrent layers and
-            // invisible to the causal attention, and it is trimmed right after the decode
-            size_t pad_len = 0;
-            size_t n_decoded = 0;
+            std::vector<size_t> todo;
             for (size_t k = base; k < end; ++k) {
                 if (!data[k].hit) {
-                    pad_len = std::max(pad_len, data[k].state_tokens.size());
-                    ++n_decoded;
+                    todo.push_back(k);
                 }
             }
-            const bool pad = pad_states && n_decoded > 1 && pad_len * n_decoded <= n_batch;
-            tm.padded += pad ? 1 : 0;
-            if (pad) {
-                for (size_t k = base; k < end; ++k) {
-                    if (!data[k].hit) {
+            // padded states: the hybrid memory splits a batch into one ubatch per distinct remaining
+            // length, and each ubatch runs the whole model; the states of a group are padded to its
+            // longest one so the group decodes as one ubatch. The padding is neutral in the recurrent
+            // layers and invisible to the causal attention, and it is trimmed right after the decode
+            const std::vector<std::vector<size_t>> groups = pad_states && todo.size() > 1 ?
+                pad_state_groups(data, todo, n_batch) : std::vector<std::vector<size_t>>{todo};
+            for (const auto & group : groups) {
+                if (!ok || group.empty()) {
+                    break;
+                }
+                size_t pad_len = 0;
+                for (const size_t k : group) {
+                    pad_len = std::max(pad_len, data[k].state_tokens.size());
+                }
+                const bool pad = pad_states && group.size() > 1;
+                tm.padded += pad ? 1 : 0;
+                if (pad) {
+                    for (const size_t k : group) {
                         llama_kev_set_valid_len(ctx, static_cast<llama_seq_id>(data[k].state_seq),
                             static_cast<int32_t>(data[k].state_tokens.size()));
                     }
                 }
-            }
-            llama_batch batch = llama_batch_init(static_cast<int32_t>(n_batch), 0, 1);
-            int32_t index = 0;
-            for (size_t k = base; k < end && ok; ++k) {
-                batch_item_data & d = data[k];
-                if (d.hit) {
-                    continue;
-                }
-                const size_t n_tok = pad ? pad_len : d.state_tokens.size();
-                for (size_t j = 0; j < n_tok; ++j) {
-                    const llama_token tok = j < d.state_tokens.size() ? d.state_tokens[j] : head.tok_decide;
-                    batch_add(batch, index++, tok, static_cast<llama_pos>(j),
-                        static_cast<llama_seq_id>(d.state_seq), !masked && j < d.state_tokens.size());
-                    if (index == static_cast<int32_t>(n_batch)) {
-                        batch.n_tokens = index;
-                        ok = llama_decode(ctx, batch) == 0;
-                        index = 0;
+                llama_batch batch = llama_batch_init(static_cast<int32_t>(n_batch), 0, 1);
+                int32_t index = 0;
+                for (size_t g = 0; g < group.size() && ok; ++g) {
+                    const batch_item_data & d = data[group[g]];
+                    const size_t n_tok = pad ? pad_len : d.state_tokens.size();
+                    for (size_t j = 0; j < n_tok; ++j) {
+                        const llama_token tok = j < d.state_tokens.size() ? d.state_tokens[j] : head.tok_decide;
+                        batch_add(batch, index++, tok, static_cast<llama_pos>(j),
+                            static_cast<llama_seq_id>(d.state_seq), !masked && j < d.state_tokens.size());
+                        if (index == static_cast<int32_t>(n_batch)) {
+                            batch.n_tokens = index;
+                            ok = llama_decode(ctx, batch) == 0;
+                            index = 0;
+                        }
                     }
                 }
-            }
-            if (ok && index > 0) {
-                batch.n_tokens = index;
-                ok = llama_decode(ctx, batch) == 0;
-            }
-            llama_batch_free(batch);
-            if (pad) {
-                for (size_t k = base; k < end; ++k) {
-                    const batch_item_data & d = data[k];
-                    if (d.hit) {
-                        continue;
+                if (ok && index > 0) {
+                    batch.n_tokens = index;
+                    ok = llama_decode(ctx, batch) == 0;
+                }
+                llama_batch_free(batch);
+                if (pad) {
+                    for (const size_t k : group) {
+                        const auto seq = static_cast<llama_seq_id>(data[k].state_seq);
+                        if (ok && data[k].state_tokens.size() < pad_len &&
+                                !llama_kev_trim_padding(ctx, seq, static_cast<llama_pos>(data[k].state_tokens.size()))) {
+                            ok = false;
+                        }
+                        llama_kev_set_valid_len(ctx, seq, -1);
                     }
-                    const auto seq = static_cast<llama_seq_id>(d.state_seq);
-                    if (ok && d.state_tokens.size() < pad_len &&
-                            !llama_kev_trim_padding(ctx, seq, static_cast<llama_pos>(d.state_tokens.size()))) {
-                        ok = false;
-                    }
-                    llama_kev_set_valid_len(ctx, seq, -1);
                 }
             }
         }
