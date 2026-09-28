@@ -791,6 +791,9 @@ bool batch_attempt(
         // branch sequence must remain for the rounds
         size_t end = base;
         uint32_t used = n_slots;
+        // keep at least half of the free sequences for branches: a wave that fills all but one
+        // sequence with states runs its branches one per round
+        const uint32_t max_states = std::max<uint32_t>(1, (n_seq_max - n_slots) / 2);
         while (end < data.size()) {
             batch_item_data & d = data[end];
             if (cache != nullptr && n_slots > 0 && d.state_tokens.size() <= cache->max_tokens()) {
@@ -803,8 +806,8 @@ bool batch_attempt(
                     continue;
                 }
             }
-            if (used + 2 > n_seq_max) {
-                break; // no room for its state plus one branch sequence
+            if (used + 2 > n_seq_max || used - n_slots >= max_states) {
+                break; // no room for its state plus the branch sequences
             }
             d.state_seq = used++;
             ++end;
