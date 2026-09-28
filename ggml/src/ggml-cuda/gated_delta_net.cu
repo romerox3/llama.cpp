@@ -220,14 +220,15 @@ static void launch_gated_delta_net(
     }
 }
 
-// experiment: GGML_CUDA_GDN_CHUNK_MIN_TOKENS lowers the per-sequence token count from which the chunked
-// kernel is used (default 128, tuned upstream on Ampere)
-static int gdn_chunk_min_tokens() {
-    static const int v = [] {
+// per-sequence token count from which the chunked kernel is used: 128 as tuned upstream on Ampere, or
+// GGML_CUDA_GDN_CHUNK_MIN_TOKENS when 4+ sequences run together (on a V100 with 16 sequences of 16-96
+// tokens the chunked kernel is 1.2-1.65x faster, while a single short sequence is faster recurrent)
+static int64_t gdn_chunk_min_tokens(const int64_t n_seqs) {
+    static const int multi = [] {
         const char * e = getenv("GGML_CUDA_GDN_CHUNK_MIN_TOKENS");
         return e != nullptr && atoi(e) > 0 ? atoi(e) : 128;
     }();
-    return v;
+    return n_seqs >= 4 ? multi : 128;
 }
 
 // Shape-only half of the chunked predicate, split out because the buffer-type get_alloc_size hook
@@ -248,6 +249,7 @@ bool ggml_cuda_gdn_chunked_shape_eligible(const ggml_tensor * dst) {
 
     const int64_t S_v      = src_v->ne[0];
     const int64_t n_tokens = src_v->ne[2];
+    const int64_t n_seqs   = src_v->ne[3];
     const int64_t neq0     = src_q->ne[0];
     const int64_t neq1     = src_q->ne[1];   // q head count
     const int64_t nev1     = src_v->ne[1];   // v head count
@@ -263,7 +265,7 @@ bool ggml_cuda_gdn_chunked_shape_eligible(const ggml_tensor * dst) {
     return !kda && K == 1
         && neq0 == 128 && S_v == 128 && nev1 % neq1 == 0
         && src_k->ne[1] == neq1
-        && n_tokens >= gdn_chunk_min_tokens()
+        && n_tokens >= gdn_chunk_min_tokens(n_seqs)
         && ggml_is_contiguous(src_q) && ggml_is_contiguous(src_k) && ggml_is_contiguous(src_g)
         && src_v->nb[0] == ggml_type_size(src_v->type) && src_v->nb[1] == (size_t)S_v * ggml_type_size(src_v->type)
         && src_v->nb[3] == (size_t) n_tokens * src_v->nb[2]

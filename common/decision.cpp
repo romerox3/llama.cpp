@@ -751,6 +751,20 @@ bool batch_prepare(
     return true;
 }
 
+// KEV_TIMING=1: host-side phase times of batch_attempt, logged once per call
+struct kev_timing {
+    bool on = getenv("KEV_TIMING") != nullptr;
+    double setup = 0, decode = 0, wait = 0, head = 0, store = 0, state = 0;
+    int rounds = 0, waves = 0;
+    std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+    double lap() {
+        const auto n = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(n - t).count();
+        t = n;
+        return ms;
+    }
+};
+
 // one pass over the runnable items, split into waves that fit the sequence budget;
 // false means a llama_decode failed (err set) and the caller may retry without cache
 bool batch_attempt(
@@ -766,6 +780,7 @@ bool batch_attempt(
     const uint32_t n_slots = cache ? cache->capacity() : 0;
     const uint32_t n_batch = llama_n_batch(ctx);
     const bool masked = llama_get_embeddings_masked(ctx);
+    kev_timing tm;
 
     auto cleanup = [&]() {
         // the working sequences go; the reserved cache slots stay as they are
@@ -821,6 +836,8 @@ bool batch_attempt(
 
         // states of the wave decode together, n_batch tokens per llama_decode at most
         const auto state_start = std::chrono::steady_clock::now();
+        tm.setup += tm.lap();
+        ++tm.waves;
         bool ok = true;
         {
             llama_batch batch = llama_batch_init(static_cast<int32_t>(n_batch), 0, 1);
@@ -848,6 +865,7 @@ bool batch_attempt(
         }
         const double state_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - state_start).count();
+        tm.state += tm.lap();
         if (!ok) {
             cleanup();
             return fail(err, "state decode failed");
@@ -920,11 +938,18 @@ bool batch_attempt(
                 }
             }
             batch.n_tokens = static_cast<int32_t>(index);
+            tm.setup += tm.lap();
             if (llama_decode(ctx, batch) != 0) {
                 llama_batch_free(batch);
                 cleanup();
                 return fail(err, "branch decode failed");
             }
+            tm.decode += tm.lap();
+            if (tm.on) {
+                llama_synchronize(ctx);
+                tm.wait += tm.lap();
+            }
+            ++tm.rounds;
             for (size_t i = 0; i < count; ++i) {
                 batch_item_data & d = data[refs[r + i].item];
                 const size_t b = refs[r + i].branch;
@@ -950,6 +975,7 @@ bool batch_attempt(
                     std::chrono::steady_clock::now() - head_start).count();
             }
             llama_batch_free(batch);
+            tm.head += tm.lap();
             r += count;
         }
         const double branch_ms = std::chrono::duration<double, std::milli>(
@@ -980,7 +1006,12 @@ bool batch_attempt(
             }
         }
         cleanup();
+        tm.store += tm.lap();
         base = end;
+    }
+    if (tm.on) {
+        fprintf(stderr, "KEV_TIMING items %zu waves %d rounds %d | setup %.2f state %.2f decode %.2f wait %.2f head %.2f store %.2f ms\n",
+            data.size(), tm.waves, tm.rounds, tm.setup, tm.state, tm.decode, tm.wait, tm.head, tm.store);
     }
     return true;
 }
