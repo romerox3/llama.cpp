@@ -3573,6 +3573,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--kev-pad-states"},
+        "Kev decision context: pad the states of a wave to one length so they decode in one ubatch; the padding is neutral and trimmed after the decode (default: disabled)",
+        [](common_params & params) {
+            params.kev_pad_states = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--kev-prefix-cache"}, "P",
         string_format("Kev decision context: keep up to P decoded states across requests, 0 = off (default: %u)", params.kev_prefix_cache),
         [](common_params & params, int value) {

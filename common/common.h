@@ -518,6 +518,7 @@ struct common_params {
     uint32_t    kev_ubatch           = 512;      // Kev decision context: physical batch size                  // NOLINT
     uint32_t    kev_batch            = 1;        // Kev decision context: requests per model pass, 1 = one by one // NOLINT
     bool        kev_pad_branches     = false;    // Kev decision context: sort branches by length and pad each round // NOLINT
+    bool        kev_pad_states       = false;    // Kev decision context: pad the states of a wave to one ubatch // NOLINT
     uint32_t    kev_prefix_cache     = 0;        // Kev decision context: cached states, 0 = off               // NOLINT
     uint32_t    kev_prefix_max_tokens = 65536;   // Kev prefix cache: total state tokens it holds              // NOLINT
     std::string prompt               = "";                                                                  // NOLINT

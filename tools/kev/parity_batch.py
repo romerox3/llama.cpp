@@ -10,7 +10,7 @@ which other requests share its batch:
 1. with -fa off the gate is max |dp| <= 1e-6 and zero changed answers;
 2. with -fa on the same numbers are reported as information only (on CPU the
    unified KV deviates on its own with flash attention, see parity_unified.py);
-3. --kev-pad-branches must pass the -fa off gate too;
+3. --kev-pad-branches and --kev-pad-states must pass the -fa off gate too;
 4. throughput on CPU: requests/s with 1, 8 and 32 clients for --kev-batch 1
    and --kev-batch 16 (six questions, distinct short texts).
 
@@ -34,11 +34,14 @@ BASE_FLAGS = ["--kev-seq-max", "16", "--kev-ubatch", "2048"]
 COMBOS = [
     ("batch16", ["--kev-batch", "16", "-fa", "off"], True),
     ("batch16+pad", ["--kev-batch", "16", "-fa", "off", "--kev-pad-branches"], True),
+    ("batch16+padstates", ["--kev-batch", "16", "-fa", "off", "--kev-pad-branches", "--kev-pad-states"], True),
     ("batch16+fa_on", ["--kev-batch", "16", "-fa", "on"], False),
     # unified is not part of the gate: on CPU its shared cell stream shifts
     # probabilities when the batch composition changes the cell layout, the same
     # class of deviation parity_unified.py documents (measured up to ~1e-3 here)
     ("batch16+unified", ["--kev-batch", "16", "-fa", "off", "--kev-unified"], False),
+    ("batch16+unified+padstates", ["--kev-batch", "16", "-fa", "off", "--kev-unified", "--kev-pad-branches",
+                                   "--kev-pad-states"], False),
 ]
 
 DP_GATE = 1e-6
@@ -197,6 +200,8 @@ def main():
     ap.add_argument("--port", type=int, default=18317)
     ap.add_argument("--requests", default="tests/kev/fixtures/requests.jsonl")
     ap.add_argument("--reference", default=".kev-models/kev-0.8b/reference.json")
+    ap.add_argument("--combos", default="",
+                    help="comma-separated combo labels to run (default: all)")
     ap.add_argument("--skip-bench", action="store_true",
                     help="skip the CPU throughput table")
     args = ap.parse_args()
@@ -209,7 +214,10 @@ def main():
 
     failed = False
     table = {}
+    wanted = [c for c in args.combos.split(",") if c]
     for label, flags, gated in COMBOS:
+        if wanted and label not in wanted:
+            continue
         print(f"\n== {label}: {' '.join(flags)} ==")
         server = Server(binary, args.model, args.kev_head, args.threads, args.port,
                         BASE_FLAGS + flags, f"/tmp/kev-parity-batch-{label}.log")

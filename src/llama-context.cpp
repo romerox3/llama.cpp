@@ -7,6 +7,9 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-memory-hybrid.h"
+#include "llama-memory-recurrent.h"
+#include "llama-kv-cache.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
@@ -2559,12 +2562,34 @@ ggml_cgraph * llama_context::graph_reserve(
     return gf;
 }
 
+void llama_context::set_kev_valid_len(llama_seq_id seq_id, int32_t len) {
+    GGML_ASSERT(seq_id >= 0);
+    if ((size_t) seq_id >= kev_valid_len.size()) {
+        kev_valid_len.resize(seq_id + 1, -1);
+    }
+    kev_valid_len[seq_id] = len;
+}
+
+bool llama_context::kev_trim_padding(llama_seq_id seq_id, llama_pos len) {
+    auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory.get());
+    if (hybrid == nullptr || len < 1) {
+        return false;
+    }
+    hybrid->get_mem_attn()->seq_rm(seq_id, len, -1);
+    return hybrid->get_mem_recr()->kev_set_pos(seq_id, len - 1);
+}
+
 llm_graph_params llama_context::graph_params(
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,
             const llama_memory_context_i * mctx,
                           llm_graph_type   gtype) const {
-    return {
+    bool kev_ragged = false;
+    for (uint32_t s = 0; s < ubatch.n_seqs_unq && !kev_ragged; ++s) {
+        const llama_seq_id seq = ubatch.seq_id_unq ? ubatch.seq_id_unq[s] : -1;
+        kev_ragged = seq >= 0 && (size_t) seq < kev_valid_len.size() && kev_valid_len[seq] >= 0;
+    }
+    llm_graph_params params = {
         /*.arch        =*/ model.arch,
         /*.hparams     =*/ model.hparams,
         /*.cparams     =*/ cparams,
@@ -2581,6 +2606,9 @@ llm_graph_params llama_context::graph_params(
         /*.cb          =*/ graph_get_cb(),
         /*.res         =*/ res,
     };
+    params.kev_valid_len = &kev_valid_len;
+    params.kev_ragged    = kev_ragged;
+    return params;
 }
 
 ggml_status llama_context::graph_compute(
@@ -3998,6 +4026,14 @@ void llama_set_embeddings_masked(llama_context * ctx, bool value) {
 
 bool llama_get_embeddings_masked(const llama_context * ctx) {
     return ctx->get_embeddings_masked();
+}
+
+void llama_kev_set_valid_len(llama_context * ctx, llama_seq_id seq_id, int32_t len) {
+    ctx->set_kev_valid_len(seq_id, len);
+}
+
+bool llama_kev_trim_padding(llama_context * ctx, llama_seq_id seq_id, llama_pos len) {
+    return ctx->kev_trim_padding(seq_id, len);
 }
 
 void llama_set_embeddings_layer_inp(llama_context * ctx, uint32_t lid, bool value) {

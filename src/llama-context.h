@@ -122,6 +122,11 @@ struct llama_context {
     void set_embeddings_skip_lm_head(bool value);
     void set_embeddings_masked(bool value);
     void set_embeddings_layer_inp(uint32_t lid, bool enable);
+
+    // Kev padded states: tokens of seq at positions >= len are padding (-1 clears)
+    void set_kev_valid_len(llama_seq_id seq_id, int32_t len);
+    // drop the padding after the decode: attention cells at >= len, recurrent position back to len - 1
+    bool kev_trim_padding(llama_seq_id seq_id, llama_pos len);
     void set_nextn_layer_offset(int32_t offset);
     void set_causal_attn(bool value);
     void set_warmup(bool value);
@@ -294,6 +299,8 @@ private:
     llama_adapter_loras_ptr loras;
 
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
+
+    std::vector<int32_t> kev_valid_len; // by seq id, -1 = no padding (see llm_graph_input_kev_valid)
 
     llama_memory_ptr memory;
 

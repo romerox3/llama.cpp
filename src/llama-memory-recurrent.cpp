@@ -158,6 +158,18 @@ void llama_memory_recurrent::clear(bool data) {
     std::fill(rs_idx.begin(), rs_idx.end(), 0);
 }
 
+bool llama_memory_recurrent::kev_set_pos(llama_seq_id seq_id, llama_pos pos) {
+    if (seq_id < 0 || (uint32_t) seq_id >= size) {
+        return false;
+    }
+    const int32_t tail_id = cells[seq_id].tail;
+    if (tail_id < 0 || cells[tail_id].pos < pos) {
+        return false;
+    }
+    cells[tail_id].pos = pos;
+    return true;
+}
+
 bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     uint32_t new_head = size;
 

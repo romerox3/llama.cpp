@@ -68,6 +68,7 @@ private:
 
     uint32_t batch_max = 1;
     bool pad_branches = false;
+    bool pad_states = false;
     std::deque<std::shared_ptr<server_decision_job>> queue;
     std::mutex queue_mutex;
     std::condition_variable queue_cv;

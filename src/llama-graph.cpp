@@ -342,6 +342,34 @@ void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
     }
 }
 
+void llm_graph_input_kev_valid::set_input(const llama_ubatch * ubatch) {
+    const int64_t n_seqs       = ubatch->n_seqs;
+    const int64_t n_seq_tokens = ubatch->n_seq_tokens;
+
+    GGML_ASSERT(ggml_backend_buffer_is_host(mask->buffer));
+    GGML_ASSERT(ggml_backend_buffer_is_host(conv_idx->buffer));
+    float   * m   = (float   *) mask->data;
+    int32_t * idx = (int32_t *) conv_idx->data;
+
+    // equal-seqs ubatch: the tokens of sequence s are [s*n_seq_tokens, (s+1)*n_seq_tokens)
+    for (int64_t s = 0; s < n_seqs; ++s) {
+        int64_t n_valid = 0;
+        for (int64_t t = 0; t < n_seq_tokens; ++t) {
+            const int64_t     i   = s*n_seq_tokens + t;
+            const llama_seq_id seq = ubatch->seq_id[i][0];
+            const int32_t     len = seq >= 0 && (size_t) seq < valid_len->size() ? (*valid_len)[seq] : -1;
+            const bool        ok  = len < 0 || ubatch->pos[i] < len;
+            m[i] = ok ? 1.0f : 0.0f;
+            n_valid += ok ? 1 : 0;
+        }
+        // conv input columns: conv_k1 of the previous state, then the new tokens; the state to keep
+        // is the window that ends at the last real token
+        for (int64_t j = 0; j < conv_k1; ++j) {
+            idx[s*conv_k1 + j] = (int32_t) (n_valid + j);
+        }
+    }
+}
+
 bool llm_graph_input_rs::can_reuse(const llm_graph_params & params) {
     const auto * mctx = static_cast<const llama_memory_recurrent_context *>(params.mctx);
 
@@ -1492,6 +1520,8 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     samplers         (params.samplers),
     cb_func          (params.cb),
     res              (params.res),
+    kev_valid_len    (params.kev_valid_len),
+    kev_ragged       (params.kev_ragged),
     ctx0             (res->get_ctx()),
     gf               (res->get_gf()) {
         res->set_params(params);
@@ -2446,6 +2476,29 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
     ggml_build_forward_expand(gf, cur);
 
     return cur;
+}
+
+llm_graph_input_kev_valid * llm_graph_context::build_inp_kev_valid(int64_t conv_k1) const {
+    GGML_ASSERT(kev_ragged && kev_valid_len != nullptr);
+    if (inp_kev_valid != nullptr) {
+        GGML_ASSERT(inp_kev_valid->conv_k1 == conv_k1);
+        return inp_kev_valid;
+    }
+
+    auto inp = std::make_unique<llm_graph_input_kev_valid>(kev_valid_len, conv_k1);
+
+    inp->mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, 1, 1, ubatch.n_seq_tokens, ubatch.n_seqs);
+    ggml_set_input(inp->mask);
+    cb(inp->mask, "kev_valid_mask", -1);
+
+    inp->conv_idx = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, conv_k1, ubatch.n_seqs);
+    ggml_set_input(inp->conv_idx);
+    cb(inp->conv_idx, "kev_conv_idx", -1);
+
+    inp_kev_valid = inp.get();
+    res->add_input(std::move(inp));
+
+    return inp_kev_valid;
 }
 
 ggml_tensor * llm_graph_context::build_inp_pos() const {

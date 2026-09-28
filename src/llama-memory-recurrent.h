@@ -44,6 +44,10 @@ public:
     void clear(bool data) override;
 
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
+
+    // Kev padded states: the state already stands at pos (the padding was neutral), only the
+    // recorded position moves back; false if the sequence has no state past pos
+    bool kev_set_pos(llama_seq_id seq_id, llama_pos pos);
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;

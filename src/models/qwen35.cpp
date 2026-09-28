@@ -389,6 +389,15 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
 
     gate = ggml_reshape_4d(ctx0, gate, 1, num_v_heads, n_seq_tokens, n_seqs);
 
+    if (kev_ragged) {
+        // pad tokens leave the delta net state as it is: no write (beta = 0), no decay (g = 0)
+        ggml_tensor * valid = build_inp_kev_valid(model.layers[il].ssm_conv1d->ne[0] - 1)->mask;
+        beta = ggml_mul(ctx0, beta, valid);
+        gate = ggml_mul(ctx0, gate, valid);
+        cb(beta, "beta_kev_valid", il);
+        cb(gate, "gate_kev_valid", il);
+    }
+
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
 

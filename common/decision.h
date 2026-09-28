@@ -161,7 +161,8 @@ bool common_decision_run_batch(
         std::vector<common_decision_batch_item> & items,
         std::string & err,
         common_decision_prefix_cache * cache = nullptr,
-        bool pad_branches = false);
+        bool pad_branches = false,
+        bool pad_states = false);
 
 nlohmann::ordered_json common_decision_answers(
         const common_decision_request & req,

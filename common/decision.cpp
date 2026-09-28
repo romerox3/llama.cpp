@@ -755,7 +755,7 @@ bool batch_prepare(
 struct kev_timing {
     bool on = getenv("KEV_TIMING") != nullptr;
     double setup = 0, decode = 0, wait = 0, head = 0, store = 0, state = 0;
-    int rounds = 0, waves = 0;
+    int rounds = 0, waves = 0, padded = 0;
     std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
     double lap() {
         const auto n = std::chrono::steady_clock::now();
@@ -774,7 +774,8 @@ bool batch_attempt(
         std::vector<batch_item_data> & data,
         std::string & err,
         common_decision_prefix_cache * cache,
-        bool pad_branches) {
+        bool pad_branches,
+        bool pad_states) {
     llama_memory_t memory = llama_get_memory(ctx);
     const uint32_t n_seq_max = llama_n_seq_max(ctx);
     const uint32_t n_slots = cache ? cache->capacity() : 0;
@@ -840,6 +841,28 @@ bool batch_attempt(
         ++tm.waves;
         bool ok = true;
         {
+            // padded states: the hybrid memory splits a batch into one ubatch per distinct remaining
+            // length, and each ubatch runs the whole model; padding the states of the wave to the
+            // longest one makes a single ubatch. The padding is neutral in the recurrent layers and
+            // invisible to the causal attention, and it is trimmed right after the decode
+            size_t pad_len = 0;
+            size_t n_decoded = 0;
+            for (size_t k = base; k < end; ++k) {
+                if (!data[k].hit) {
+                    pad_len = std::max(pad_len, data[k].state_tokens.size());
+                    ++n_decoded;
+                }
+            }
+            const bool pad = pad_states && n_decoded > 1 && pad_len * n_decoded <= n_batch;
+            tm.padded += pad ? 1 : 0;
+            if (pad) {
+                for (size_t k = base; k < end; ++k) {
+                    if (!data[k].hit) {
+                        llama_kev_set_valid_len(ctx, static_cast<llama_seq_id>(data[k].state_seq),
+                            static_cast<int32_t>(data[k].state_tokens.size()));
+                    }
+                }
+            }
             llama_batch batch = llama_batch_init(static_cast<int32_t>(n_batch), 0, 1);
             int32_t index = 0;
             for (size_t k = base; k < end && ok; ++k) {
@@ -847,9 +870,11 @@ bool batch_attempt(
                 if (d.hit) {
                     continue;
                 }
-                for (size_t j = 0; j < d.state_tokens.size(); ++j) {
-                    batch_add(batch, index++, d.state_tokens[j], static_cast<llama_pos>(j),
-                        static_cast<llama_seq_id>(d.state_seq), !masked);
+                const size_t n_tok = pad ? pad_len : d.state_tokens.size();
+                for (size_t j = 0; j < n_tok; ++j) {
+                    const llama_token tok = j < d.state_tokens.size() ? d.state_tokens[j] : head.tok_decide;
+                    batch_add(batch, index++, tok, static_cast<llama_pos>(j),
+                        static_cast<llama_seq_id>(d.state_seq), !masked && j < d.state_tokens.size());
                     if (index == static_cast<int32_t>(n_batch)) {
                         batch.n_tokens = index;
                         ok = llama_decode(ctx, batch) == 0;
@@ -862,6 +887,20 @@ bool batch_attempt(
                 ok = llama_decode(ctx, batch) == 0;
             }
             llama_batch_free(batch);
+            if (pad) {
+                for (size_t k = base; k < end; ++k) {
+                    const batch_item_data & d = data[k];
+                    if (d.hit) {
+                        continue;
+                    }
+                    const auto seq = static_cast<llama_seq_id>(d.state_seq);
+                    if (ok && d.state_tokens.size() < pad_len &&
+                            !llama_kev_trim_padding(ctx, seq, static_cast<llama_pos>(d.state_tokens.size()))) {
+                        ok = false;
+                    }
+                    llama_kev_set_valid_len(ctx, seq, -1);
+                }
+            }
         }
         const double state_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - state_start).count();
@@ -1010,8 +1049,8 @@ bool batch_attempt(
         base = end;
     }
     if (tm.on) {
-        fprintf(stderr, "KEV_TIMING items %zu waves %d rounds %d | setup %.2f state %.2f decode %.2f wait %.2f head %.2f store %.2f ms\n",
-            data.size(), tm.waves, tm.rounds, tm.setup, tm.state, tm.decode, tm.wait, tm.head, tm.store);
+        fprintf(stderr, "KEV_TIMING items %zu waves %d padded %d rounds %d | setup %.2f state %.2f decode %.2f wait %.2f head %.2f store %.2f ms\n",
+            data.size(), tm.waves, tm.padded, tm.rounds, tm.setup, tm.state, tm.decode, tm.wait, tm.head, tm.store);
     }
     return true;
 }
@@ -1024,7 +1063,8 @@ bool common_decision_run_batch(
         std::vector<common_decision_batch_item> & items,
         std::string & err,
         common_decision_prefix_cache * cache,
-        bool pad_branches) {
+        bool pad_branches,
+        bool pad_states) {
     if (llama_pooling_type(ctx) != LLAMA_POOLING_TYPE_NONE) {
         return fail(err, "Kev decision context must use pooling NONE");
     }
@@ -1064,7 +1104,7 @@ bool common_decision_run_batch(
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         std::string attempt_err;
-        if (batch_attempt(ctx, head, items, data, attempt_err, cache, pad_branches)) {
+        if (batch_attempt(ctx, head, items, data, attempt_err, cache, pad_branches, pad_states)) {
             for (const auto & d : data) {
                 items[d.item].ok = true;
             }

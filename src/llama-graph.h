@@ -282,6 +282,25 @@ public:
     int32_t rs_z;
 };
 
+// Kev padded states: per-token validity for the recurrent layers of hybrid models. Pad tokens sit after
+// the real tokens of a sequence (same seq, consecutive positions): the attention is causal, so real tokens
+// never see them, and the recurrent layers neutralise them (beta = 0, g = 0 keep the delta net state, and
+// the conv state is saved at the last real token)
+class llm_graph_input_kev_valid : public llm_graph_input_i {
+public:
+    llm_graph_input_kev_valid(const std::vector<int32_t> * valid_len, int64_t conv_k1) :
+        valid_len(valid_len), conv_k1(conv_k1) {}
+    virtual ~llm_graph_input_kev_valid() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    ggml_tensor * mask     = nullptr; // F32 [1, 1, n_seq_tokens, n_seqs]
+    ggml_tensor * conv_idx = nullptr; // I32 [conv_k1, n_seqs]
+
+    const std::vector<int32_t> * valid_len; // by seq id, -1 = no padding
+    const int64_t conv_k1;
+};
+
 class llm_graph_input_cross_embd : public llm_graph_input_i {
 public:
     llm_graph_input_cross_embd(
@@ -810,6 +829,10 @@ struct llm_graph_params {
 
     llm_graph_result * res;
 
+    // Kev padded states (see llm_graph_input_kev_valid)
+    const std::vector<int32_t> * kev_valid_len = nullptr;
+    bool kev_ragged = false;
+
     // return true if the "other" params would result in a graph with the same topology as with the current params
     //   having the same topology allows us to reuse the graph in some cases
     bool allow_reuse(const llm_graph_params & other) const {
@@ -841,6 +864,10 @@ struct llm_graph_params {
         }
 
         if (!can_reuse_ubatch) {
+            return false;
+        }
+
+        if (kev_ragged || other.kev_ragged) {
             return false;
         }
 
@@ -1033,6 +1060,10 @@ struct llm_graph_context {
 
     llm_graph_result * res;
 
+    const std::vector<int32_t> * kev_valid_len;
+    const bool kev_ragged;
+    mutable llm_graph_input_kev_valid * inp_kev_valid = nullptr;
+
     ggml_context * ctx0 = nullptr;
     ggml_cgraph  * gf   = nullptr;
 
@@ -1040,6 +1071,9 @@ struct llm_graph_context {
     virtual ~llm_graph_context() = default;
 
     void cb(ggml_tensor * cur, const char * name, int il) const;
+
+    // Kev padded states: built once per graph on first use, only when kev_ragged
+    llm_graph_input_kev_valid * build_inp_kev_valid(int64_t conv_k1) const;
 
     //
     // common

@@ -480,11 +480,20 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
         const int64_t s_idx  = conv_input->ne[0] - conv_states->ne[0];
         const int64_t s_slot = 0;
 
-        ggml_tensor * conv_state_last =
-            ggml_view_3d(ctx0, conv_input,
-                    conv_kernel_size - 1, conv_channels, n_seqs,
-                    conv_input->nb[1], conv_input->nb[2],
-                    ggml_row_size(conv_input->type, s_idx));
+        ggml_tensor * conv_state_last = nullptr;
+        if (kev_ragged) {
+            // Kev padded states: keep the window that ends at the last real token of each sequence
+            ggml_tensor * idx = build_inp_kev_valid(conv_kernel_size - 1)->conv_idx;
+            ggml_tensor * cols = ggml_cont(ctx0, ggml_permute(ctx0, conv_input, 1, 0, 2, 3)); // [channels, time, n_seqs]
+            ggml_tensor * win  = ggml_get_rows(ctx0, cols, idx);                              // [channels, k-1, n_seqs]
+            conv_state_last = ggml_cont(ctx0, ggml_permute(ctx0, win, 1, 0, 2, 3));           // [k-1, channels, n_seqs]
+        } else {
+            conv_state_last =
+                ggml_view_3d(ctx0, conv_input,
+                        conv_kernel_size - 1, conv_channels, n_seqs,
+                        conv_input->nb[1], conv_input->nb[2],
+                        ggml_row_size(conv_input->type, s_idx));
+        }
         cb(conv_state_last, "conv_state_last", il);
 
         ggml_tensor * conv_state_update =
@@ -498,6 +507,7 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
         // [TAG_RECURRENT_ROLLBACK_SPLITS]
         // this logic assumes that the last (n_rs_seq + 1) tokens of a sequence in a batch are inside
         //   the same ubatch, which `split_equal()` guarantees via its n_keep_tail argument
+        GGML_ASSERT(!kev_ragged && "Kev padded states do not support recurrent rollback");
 
         const int64_t K = (int64_t) cparams.n_rs_seq + 1;
 

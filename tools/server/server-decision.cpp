@@ -81,6 +81,7 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
     }
     batch_max = params.kev_batch;
     pad_branches = params.kev_pad_branches;
+    pad_states = params.kev_pad_states;
 
     auto cparams = common_context_params_to_llama(params);
     cparams.n_seq_max = seq_max;
@@ -187,7 +188,7 @@ void server_decision::owner_loop() {
             items[i].res = &results[i];
         }
         std::string batch_err;
-        common_decision_run_batch(ctx, head, items, batch_err, prefix_cache.get(), pad_branches);
+        common_decision_run_batch(ctx, head, items, batch_err, prefix_cache.get(), pad_branches, pad_states);
         for (size_t i = 0; i < group.size(); ++i) {
             auto & job = group[i];
             if (!items[i].ok) {

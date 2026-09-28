@@ -110,6 +110,14 @@ LLAMA_API void llama_set_embeddings_masked(struct llama_context * ctx, bool valu
 // Returns whether masked embedding output is enabled for this context
 LLAMA_API bool llama_get_embeddings_masked(const struct llama_context * ctx);
 
+// Kev padded states (hybrid qwen35 only): the tokens of seq_id at positions >= len in the next
+// decodes are padding, so states of different lengths share one ubatch. len = -1 clears it.
+LLAMA_API void llama_kev_set_valid_len(struct llama_context * ctx, llama_seq_id seq_id, int32_t len);
+
+// After decoding padded states: remove the padding cells of seq_id (positions >= len) from the
+// attention cache and move its recurrent position back to len - 1. False if not a hybrid memory.
+LLAMA_API bool llama_kev_trim_padding(struct llama_context * ctx, llama_seq_id seq_id, llama_pos len);
+
 // Select which appended NextN block the DECODER_MTP graph runs (offset past
 // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
 // chain multiple trained NextN heads. Default 0 (first head).
