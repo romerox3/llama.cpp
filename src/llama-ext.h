@@ -118,6 +118,19 @@ LLAMA_API void llama_kev_set_valid_len(struct llama_context * ctx, llama_seq_id 
 // attention cache and move its recurrent position back to len - 1. False if not a hybrid memory.
 LLAMA_API bool llama_kev_trim_padding(struct llama_context * ctx, llama_seq_id seq_id, llama_pos len);
 
+// Kev pipelined rounds (embeddings, pooling NONE). With double outputs every decode writes its
+// embeddings into the other of two halves, so the rows of decode N stay valid while decode N+1 runs:
+// - llama_kev_output_rows: row pointers of the last decode for batch indices idx, without
+//   synchronizing (the data lands when llama_kev_wait_output(ctx, half) returns);
+// - llama_kev_set_output_pending(true) while rows of a half are still read: the output buffer then
+//   must not grow (asserted), so check llama_kev_output_capacity (rows per half) before a decode.
+LLAMA_API void    llama_kev_set_double_outputs(struct llama_context * ctx, bool value);
+LLAMA_API void    llama_kev_set_output_pending(struct llama_context * ctx, bool value);
+LLAMA_API int32_t llama_kev_output_half(const struct llama_context * ctx);
+LLAMA_API int32_t llama_kev_output_capacity(const struct llama_context * ctx);
+LLAMA_API bool    llama_kev_output_rows(struct llama_context * ctx, const int32_t * idx, int32_t n, const float ** rows);
+LLAMA_API void    llama_kev_wait_output(struct llama_context * ctx, int32_t half);
+
 // Select which appended NextN block the DECODER_MTP graph runs (offset past
 // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
 // chain multiple trained NextN heads. Default 0 (first head).

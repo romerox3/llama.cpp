@@ -492,6 +492,12 @@ llama_context::llama_context(
 llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
+    for (auto & evt : kev_evt) {
+        if (evt != nullptr) {
+            ggml_backend_event_free(evt);
+            evt = nullptr;
+        }
+    }
 
     // when training, ggml_opt allocates extra buffers through the scheduler, so the sizes no longer match the expectation
     if (!model.hparams.no_alloc && !opt_ctx) {
@@ -1939,6 +1945,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
     }
 
     // reserve output buffer
+    if (kev_dbl_out) {
+        kev_half ^= 1; // this decode writes the other half
+    }
+
     if (output_reserve(n_outputs_all) < n_outputs_all) {
         LLAMA_LOG_ERROR("%s: could not reserve space for batch with %d outputs\n", __func__, n_outputs_all);
         return -2;
@@ -2042,6 +2052,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
         if (embd.data && t_embd && n_outputs > 0) {
             ggml_backend_t backend_embd = ggml_backend_sched_get_tensor_backend(sched.get(), t_embd);
             GGML_ASSERT(backend_embd != nullptr);
+            kev_evt_backend = backend_embd;
 
             switch (cparams.pooling_type) {
                 case LLAMA_POOLING_TYPE_NONE:
@@ -2132,6 +2143,16 @@ int llama_context::decode(const llama_batch & batch_inp) {
         n_outputs_prev += n_outputs;
         n_tokens_prev  += ubatch.n_tokens;
     } while (mctx->next());
+
+    if (kev_dbl_out && kev_evt_backend != nullptr) {
+        // marks the end of this decode's output copies on the stream that ran them
+        if (kev_evt[kev_half] == nullptr) {
+            kev_evt[kev_half] = ggml_backend_event_new(ggml_backend_get_device(kev_evt_backend));
+        }
+        if (kev_evt[kev_half] != nullptr) {
+            ggml_backend_event_record(kev_evt[kev_half], kev_evt_backend);
+        }
+    }
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;
@@ -2248,12 +2269,14 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
     const size_t prev_size = buf_output ? ggml_backend_buffer_get_size(buf_output.get()) : 0;
     const size_t new_size  =
-        (logits.size + embd.size + embd_nextn.size + embd_layer_inp_float_count + backend_float_count) * sizeof(float) +
+        (logits.size + embd.size * (kev_dbl_out ? 2 : 1) + embd_nextn.size + embd_layer_inp_float_count + backend_float_count) * sizeof(float) +
         (                                                                         backend_token_count) * sizeof(llama_token);
 
     // alloc only when more than the current capacity is required
     // TODO: also consider shrinking the buffer
     if (!buf_output || prev_size < new_size) {
+        // a pipelined caller still reads rows of the other half: moving the buffer would free them
+        GGML_ASSERT(!(kev_dbl_out && kev_out_pending && buf_output) && "Kev pipelined rounds: output buffer grew with rows pending");
         if (buf_output) {
 #ifndef NDEBUG
             // This doesn't happen often, but may be annoying in some cases (like the HellaSwag benchmark)
@@ -2296,6 +2319,13 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
     embd = has_embd ? buffer_view<float>{(float *) (base + offset), embd.size} : buffer_view<float>{nullptr, 0};
     offset += embd.size * sizeof(float);
+    if (kev_dbl_out && has_embd) {
+        // the second half follows the first one; embd views the half of the current decode
+        kev_embd_base = (float *) (base + offset - embd.size * sizeof(float));
+        kev_embd_half = embd.size;
+        embd.data = kev_embd_base + kev_half * kev_embd_half;
+        offset += embd.size * sizeof(float);
+    }
 
     embd_nextn = has_embd_nextn ? buffer_view<float>{(float *) (base + offset), embd_nextn.size} : buffer_view<float>{nullptr, 0};
     offset += embd_nextn.size * sizeof(float);
@@ -2641,6 +2671,70 @@ void llama_context::set_kev_valid_len(llama_seq_id seq_id, int32_t len) {
         kev_valid_len.resize(seq_id + 1, -1);
     }
     kev_valid_len[seq_id] = len;
+}
+
+void llama_context::kev_set_double_outputs(bool value) {
+    if (value == kev_dbl_out) {
+        return;
+    }
+    GGML_ASSERT(!kev_out_pending);
+    synchronize();
+    kev_dbl_out = value;
+    // the next output_reserve lays the buffer out again (and grows it for the second half)
+    buf_output.reset();
+    logits.data = nullptr;
+    embd.data = nullptr;
+    embd_nextn.data = nullptr;
+    kev_embd_base = nullptr;
+    kev_embd_half = 0;
+}
+
+void llama_context::kev_set_output_pending(bool value) {
+    kev_out_pending = value;
+}
+
+int32_t llama_context::kev_output_half() const {
+    return kev_half;
+}
+
+int32_t llama_context::kev_output_capacity() const {
+    const uint32_t n_embd_out = model.hparams.n_embd_out();
+    return kev_dbl_out && n_embd_out > 0 ? (int32_t) (kev_embd_half / n_embd_out) : 0;
+}
+
+bool llama_context::kev_output_rows(const int32_t * idx, int32_t n, const float ** rows) {
+    // rows of the last decode without synchronizing and without output_reorder(): the async copies
+    // wrote the outputs in ubatch order, output_swaps would sort them later, so undo that permutation
+    if (!kev_dbl_out || embd.data == nullptr) {
+        return false;
+    }
+    std::vector<int64_t> src(n_outputs);
+    for (int64_t k = 0; k < n_outputs; ++k) {
+        src[k] = k;
+    }
+    for (const auto & sw : output_swaps) {
+        std::swap(src[sw.i0], src[sw.i1]);
+    }
+    const uint32_t n_embd_out = model.hparams.n_embd_out();
+    for (int32_t k = 0; k < n; ++k) {
+        int64_t j;
+        try {
+            j = output_resolve_row(idx[k]);
+        } catch (const std::exception & err) {
+            LLAMA_LOG_ERROR("%s: invalid output id %d: %s\n", __func__, idx[k], err.what());
+            return false;
+        }
+        rows[k] = embd.data + src[j] * n_embd_out;
+    }
+    return true;
+}
+
+void llama_context::kev_wait_output(int32_t half) {
+    if (half >= 0 && half < 2 && kev_evt[half] != nullptr) {
+        ggml_backend_event_synchronize(kev_evt[half]);
+    } else {
+        synchronize();
+    }
 }
 
 bool llama_context::kev_trim_padding(llama_seq_id seq_id, llama_pos len) {
@@ -4099,6 +4193,30 @@ void llama_set_embeddings_masked(llama_context * ctx, bool value) {
 
 bool llama_get_embeddings_masked(const llama_context * ctx) {
     return ctx->get_embeddings_masked();
+}
+
+void llama_kev_set_double_outputs(llama_context * ctx, bool value) {
+    ctx->kev_set_double_outputs(value);
+}
+
+void llama_kev_set_output_pending(llama_context * ctx, bool value) {
+    ctx->kev_set_output_pending(value);
+}
+
+int32_t llama_kev_output_half(const llama_context * ctx) {
+    return ctx->kev_output_half();
+}
+
+int32_t llama_kev_output_capacity(const llama_context * ctx) {
+    return ctx->kev_output_capacity();
+}
+
+bool llama_kev_output_rows(llama_context * ctx, const int32_t * idx, int32_t n, const float ** rows) {
+    return ctx->kev_output_rows(idx, n, rows);
+}
+
+void llama_kev_wait_output(llama_context * ctx, int32_t half) {
+    ctx->kev_wait_output(half);
 }
 
 void llama_kev_set_valid_len(llama_context * ctx, llama_seq_id seq_id, int32_t len) {

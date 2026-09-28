@@ -811,7 +811,7 @@ std::vector<std::vector<size_t>> pad_state_groups(
 struct kev_timing {
     bool on = getenv("KEV_TIMING") != nullptr;
     double setup = 0, decode = 0, wait = 0, head = 0, store = 0, state = 0;
-    int rounds = 0, waves = 0, padded = 0;
+    int rounds = 0, waves = 0, padded = 0, overlapped = 0;
     std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
     double lap() {
         const auto n = std::chrono::steady_clock::now();
@@ -838,6 +838,13 @@ bool batch_attempt(
     const uint32_t n_batch = llama_n_batch(ctx);
     const bool masked = llama_get_embeddings_masked(ctx);
     kev_timing tm;
+    // experiment: KEV_PIPELINE=1 decodes branch round N+1 before running the head of round N, whose
+    // rows stay in the other half of a double output buffer, so the host work between rounds (head,
+    // sequence copies, batch and graph setup) overlaps the GPU
+    static const bool pipeline = getenv("KEV_PIPELINE") != nullptr;
+    if (pipeline) {
+        llama_kev_set_double_outputs(ctx, true);
+    }
     // experiment: KEV_HEAD_THREADS=N computes the pointer head of a round's branches on N threads
     static const size_t head_threads = [] {
         const char * e = getenv("KEV_HEAD_THREADS");
@@ -989,6 +996,64 @@ bool batch_attempt(
                 return data[a.item].branches[a.branch].size() < data[b.item].branches[b.branch].size();
             });
         }
+        // the rows one round reads; rows[first[i] .. first[i + 1] - 1) belong to branch i, the last one
+        // being its <decide>
+        struct round_rows {
+            size_t r = 0;
+            size_t count = 0;
+            std::vector<size_t> first;
+            std::vector<const float *> rows;
+            int32_t half = -1;
+        };
+        auto run_round_heads = [&](const round_rows & rr) {
+            // the branches are independent and each one is computed the same way on any thread
+            std::vector<double> round_head_ms(rr.count, 0.0);
+            auto run_heads = [&](size_t first, size_t step) {
+                for (size_t i = first; i < rr.count; i += step) {
+                    const batch_item_data & d = data[refs[rr.r + i].item];
+                    const std::vector<const float *> options(rr.rows.begin() + rr.first[i], rr.rows.begin() + rr.first[i + 1] - 1);
+                    const auto head_start = std::chrono::steady_clock::now();
+                    items[d.item].res->probs[refs[rr.r + i].branch] =
+                        common_decision_probabilities(head, rr.rows[rr.first[i + 1] - 1], options);
+                    round_head_ms[i] = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - head_start).count();
+                }
+            };
+            const size_t n_head_threads = std::min<size_t>(head_threads, rr.count);
+            if (n_head_threads > 1) {
+                std::vector<std::thread> workers;
+                for (size_t t = 1; t < n_head_threads; ++t) {
+                    workers.emplace_back(run_heads, t, n_head_threads);
+                }
+                run_heads(0, n_head_threads);
+                for (auto & w : workers) {
+                    w.join();
+                }
+            } else {
+                run_heads(0, 1);
+            }
+            for (size_t i = 0; i < rr.count; ++i) {
+                items[data[refs[rr.r + i].item].item].res->t_head_ms += round_head_ms[i];
+            }
+        };
+        round_rows pending; // pipelined: the round whose head has not run yet (count 0: none)
+        auto finish_pending = [&]() {
+            if (pending.count == 0) {
+                return;
+            }
+            llama_kev_wait_output(ctx, pending.half);
+            run_round_heads(pending);
+            pending = round_rows();
+            llama_kev_set_output_pending(ctx, false);
+        };
+        auto drop_pending = [&]() {
+            if (pending.count == 0) {
+                return;
+            }
+            llama_synchronize(ctx);
+            pending = round_rows();
+            llama_kev_set_output_pending(ctx, false);
+        };
         const auto branch_start = std::chrono::steady_clock::now();
         for (size_t r = 0; r < refs.size();) {
             size_t count = 0;
@@ -1038,71 +1103,74 @@ bool batch_attempt(
                 }
             }
             batch.n_tokens = static_cast<int32_t>(index);
+            // the rows this round reads: the option ends of each branch, then its <decide>
+            round_rows cur;
+            cur.r = r;
+            cur.count = count;
+            cur.first.resize(count + 1, 0);
+            std::vector<int32_t> row_idx;
+            for (size_t i = 0; i < count; ++i) {
+                const batch_item_data & d = data[refs[r + i].item];
+                const size_t b = refs[r + i].branch;
+                cur.first[i] = row_idx.size();
+                for (const int32_t position : d.option_ends[b]) {
+                    row_idx.push_back(static_cast<int32_t>(offsets[i] + position));
+                }
+                row_idx.push_back(static_cast<int32_t>(offsets[i] + d.decides[b]));
+            }
+            cur.first[count] = row_idx.size();
             tm.setup += tm.lap();
+            // pipelined: a decode with more outputs than a half holds would move the output buffer
+            // under the pending rows, so those are consumed first
+            const size_t n_out = masked ? row_idx.size() : index;
+            if (pipeline && pending.count > 0 && n_out > static_cast<size_t>(llama_kev_output_capacity(ctx))) {
+                finish_pending();
+            }
             if (llama_decode(ctx, batch) != 0) {
                 llama_batch_free(batch);
+                drop_pending();
                 cleanup();
                 return fail(err, "branch decode failed");
             }
             tm.decode += tm.lap();
-            if (tm.on) {
+            if (tm.on && !pipeline) {
                 llama_synchronize(ctx);
                 tm.wait += tm.lap();
             }
             ++tm.rounds;
-            // rows first (llama_get_embeddings_ith is not for concurrent use), then the head
-            std::vector<std::vector<const float *>> round_options(count);
-            std::vector<const float *> round_decides(count);
-            for (size_t i = 0; i < count; ++i) {
-                const batch_item_data & d = data[refs[r + i].item];
-                const size_t b = refs[r + i].branch;
-                for (const int32_t position : d.option_ends[b]) {
-                    float * embedding = llama_get_embeddings_ith(ctx, static_cast<int32_t>(offsets[i] + position));
-                    if (embedding == nullptr) {
-                        llama_batch_free(batch);
-                        cleanup();
-                        return fail(err, "decision context was not created with embeddings enabled");
-                    }
-                    round_options[i].push_back(embedding);
-                }
-                round_decides[i] = llama_get_embeddings_ith(ctx, static_cast<int32_t>(offsets[i] + d.decides[b]));
-                if (round_decides[i] == nullptr) {
-                    llama_batch_free(batch);
-                    cleanup();
-                    return fail(err, "decision context was not created with embeddings enabled");
-                }
-            }
-            // the branches are independent and each one is computed the same way on any thread
-            std::vector<double> round_head_ms(count, 0.0);
-            auto run_heads = [&](size_t first, size_t step) {
-                for (size_t i = first; i < count; i += step) {
-                    const batch_item_data & d = data[refs[r + i].item];
-                    const auto head_start = std::chrono::steady_clock::now();
-                    items[d.item].res->probs[refs[r + i].branch] =
-                        common_decision_probabilities(head, round_decides[i], round_options[i]);
-                    round_head_ms[i] = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - head_start).count();
-                }
-            };
-            const size_t n_head_threads = std::min<size_t>(head_threads, count);
-            if (n_head_threads > 1) {
-                std::vector<std::thread> workers;
-                for (size_t t = 1; t < n_head_threads; ++t) {
-                    workers.emplace_back(run_heads, t, n_head_threads);
-                }
-                run_heads(0, n_head_threads);
-                for (auto & w : workers) {
-                    w.join();
-                }
+            cur.rows.resize(row_idx.size());
+            bool rows_ok = true;
+            if (pipeline) {
+                // pointers into this decode's half, filled when its output copies land
+                rows_ok = llama_kev_output_rows(ctx, row_idx.data(), static_cast<int32_t>(row_idx.size()), cur.rows.data());
+                cur.half = llama_kev_output_half(ctx);
             } else {
-                run_heads(0, 1);
-            }
-            for (size_t i = 0; i < count; ++i) {
-                items[data[refs[r + i].item].item].res->t_head_ms += round_head_ms[i];
+                for (size_t k = 0; k < row_idx.size() && rows_ok; ++k) {
+                    cur.rows[k] = llama_get_embeddings_ith(ctx, row_idx[k]);
+                    rows_ok = cur.rows[k] != nullptr;
+                }
             }
             llama_batch_free(batch);
+            if (!rows_ok) {
+                drop_pending();
+                cleanup();
+                return fail(err, "decision context was not created with embeddings enabled");
+            }
+            if (pipeline) {
+                // the previous round finished on the GPU before this decode copied its inputs; its
+                // head now runs while the GPU works on this round
+                tm.overlapped += pending.count > 0 ? 1 : 0;
+                finish_pending();
+                pending = std::move(cur);
+                llama_kev_set_output_pending(ctx, true);
+            } else {
+                run_round_heads(cur);
+            }
             tm.head += tm.lap();
             r += count;
+        }
+        if (pipeline) {
+            finish_pending();
         }
         const double branch_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - branch_start).count();
@@ -1136,8 +1204,8 @@ bool batch_attempt(
         base = end;
     }
     if (tm.on) {
-        fprintf(stderr, "KEV_TIMING items %zu waves %d padded %d rounds %d | setup %.2f state %.2f decode %.2f wait %.2f head %.2f store %.2f ms\n",
-            data.size(), tm.waves, tm.padded, tm.rounds, tm.setup, tm.state, tm.decode, tm.wait, tm.head, tm.store);
+        fprintf(stderr, "KEV_TIMING items %zu waves %d padded %d rounds %d overlapped %d | setup %.2f state %.2f decode %.2f wait %.2f head %.2f store %.2f ms\n",
+            data.size(), tm.waves, tm.padded, tm.rounds, tm.overlapped, tm.setup, tm.state, tm.decode, tm.wait, tm.head, tm.store);
     }
     return true;
 }

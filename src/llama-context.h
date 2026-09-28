@@ -127,6 +127,15 @@ struct llama_context {
     void set_kev_valid_len(llama_seq_id seq_id, int32_t len);
     // drop the padding after the decode: attention cells at >= len, recurrent position back to len - 1
     bool kev_trim_padding(llama_seq_id seq_id, llama_pos len);
+
+    // Kev pipelined rounds: two halves for the embeddings output, alternating per decode, so the rows
+    // of one decode stay readable while the next decode runs (see llama_kev_set_double_outputs)
+    void kev_set_double_outputs(bool value);
+    void kev_set_output_pending(bool value);
+    int32_t kev_output_half() const;
+    int32_t kev_output_capacity() const;
+    bool kev_output_rows(const int32_t * idx, int32_t n, const float ** rows);
+    void kev_wait_output(int32_t half);
     void set_nextn_layer_offset(int32_t offset);
     void set_causal_attn(bool value);
     void set_warmup(bool value);
@@ -301,6 +310,14 @@ private:
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
     std::vector<int32_t> kev_valid_len; // by seq id, -1 = no padding (see llm_graph_input_kev_valid)
+
+    bool kev_dbl_out = false;      // embeddings output in two alternating halves
+    bool kev_out_pending = false;  // the caller still reads the other half: the output buffer must not move
+    int32_t kev_half = 0;          // half written by the last decode
+    float * kev_embd_base = nullptr;
+    size_t kev_embd_half = 0;      // floats per half
+    ggml_backend_t kev_evt_backend = nullptr;
+    ggml_backend_event_t kev_evt[2] = {nullptr, nullptr}; // recorded after the output copies of each half
 
     llama_memory_ptr memory;
 
