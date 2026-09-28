@@ -1,6 +1,7 @@
 #include "cpy.cuh"
 #include "dequantize.cuh"
 #include "cpy-utils.cuh"
+#include "convert.cuh"
 #if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
 #include "ggml-musa/mudnn.cuh"
 #endif // GGML_USE_MUSA && GGML_MUSA_MUDNN_COPY
@@ -493,7 +494,12 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
                 (src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream);
         }
     } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F16) {
-        if (contiguous_srcs) {
+        // experiment: GGML_CUDA_CPY_F16_VEC=1 casts a contiguous F32 tensor with the vectorized converter the
+        // cuBLAS path uses for its F16 input (same ggml_cuda_cast per element, four elements per thread)
+        static const bool vec = getenv("GGML_CUDA_CPY_F16_VEC") != nullptr;
+        if (contiguous_srcs && vec) {
+            ggml_get_to_fp16_cuda(GGML_TYPE_F32)(src0_ddc, (half *) src1_ddc, ne, main_stream);
+        } else if (contiguous_srcs) {
             ggml_cpy_scalar_contiguous_cuda<float, half>
                 (src0_ddc, src1_ddc, ne, main_stream);
         } else {
