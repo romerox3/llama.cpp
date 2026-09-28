@@ -1,7 +1,9 @@
 """Golden fixtures for the kev-llama contract tests, produced by the ORIGINAL Python Kev (kev/api.py, kev/model.py).
 
-Run on the CPD with the kev venv (CPU only, tokenizer only; does not touch kev.service):
-    HF_HOME=/ai/kev/hf HF_HUB_OFFLINE=1 /ai/kev/venv/bin/python gen_golden.py OUT_DIR
+Run with a Python environment that has the original Kev installed (CPU only, tokenizer only):
+    KEV_SRC=/path/to/kev HF_HUB_OFFLINE=1 python gen_golden.py OUT_DIR
+KEV_SRC is a checkout of https://github.com/jaredpalmer/kev (default: the current directory); the
+tokenizer is read from the Hugging Face cache (HF_HOME) for the run below.
 
 Writes one JSONL file per surface. Every expected value comes from calling the original functions; nothing is
 hand-written except the inputs. Inputs that are JSON are stored as raw JSON TEXT (field "json") so the C++ side parses
@@ -11,7 +13,8 @@ import json, os, random, subprocess, sys
 import numpy as np
 import pydantic
 
-sys.path.insert(0, "/ai/kev/src")
+KEV_SRC = os.environ.get("KEV_SRC", os.getcwd())
+sys.path.insert(0, KEV_SRC)
 from kev.api import (SystemOneRequest, render, option_text, to_record, to_answers, output_tokens, date_facts,
                      with_date_facts, choice_confidence, score_confidence, round_prob, question_keys)
 from kev.checkpoint import Checkpoint
@@ -198,7 +201,7 @@ w("date_facts.jsonl", [{"text": t, "expected": date_facts(t)} for t in DATES])
 DF_STATES = ['"July 22, 2026 and August 3, 2026"', '{"a":"2026-01-01","b":"2026-02-01"}', '["2026-01-01","2026-01-05"]', '"one 2026-01-01"']
 w("with_date_facts.jsonl", [{"json": s, "expected": with_date_facts(json.loads(s))} for s in DF_STATES])
 
-src_commit = subprocess.run(["git", "-C", "/ai/kev/src", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+src_commit = subprocess.run(["git", "-C", KEV_SRC, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 json.dump({"kev_commit": src_commit, "run": RUN, "tokenizer": f"{ck.meta.base}@{ck.meta.base_revision}",
            "serve_max_state": SERVE_MAX_STATE, "serve_max_branch": SERVE_MAX_BRANCH, "pydantic": pydantic.VERSION},
           open(os.path.join(OUT, "PROVENANCE.json"), "w"), indent=1)
