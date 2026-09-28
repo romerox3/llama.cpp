@@ -1,5 +1,11 @@
 # llama.cpp
 
+> [!IMPORTANT]
+> **This branch (`kev-v100`) builds on espetro's Kev port** below and adds a byte-for-byte HTTP contract with
+> the reference PyTorch server, documents of up to 64k tokens, and batching and GPU optimizations tuned on a
+> Tesla V100: about 7.1 requests/s with 64 concurrent clients, with the same answers as PyTorch.
+> Details, flags, results and credits in [tools/kev/README.md](tools/kev/README.md).
+
 > [!NOTE]
 > **This fork adds native support for [Kev](https://github.com/jaredpalmer/kev) System One decision models.** A Kev GGUF loads like any other model, and `llama-server` exposes the TypeSafe-compatible `POST /v1/systemone` endpoint plus a `/studio` page for editing state and questions. No Python at inference time. Everything else is stock upstream llama.cpp.
 >
