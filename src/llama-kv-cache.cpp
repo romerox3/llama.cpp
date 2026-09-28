@@ -379,6 +379,13 @@ void llama_kv_cache::clear(bool data) {
     }
 }
 
+// experiment: LLAMA_KEV_KV_SCAN_USED=1 stops the per-cell scans of seq_rm/seq_cp at used_max_p1(); the cells
+// above it are empty (pos -1, no sequence), so pos_in() skips them anyway and the result is the same
+static uint32_t kv_scan_end(const llama_kv_cells & cells) {
+    static const bool scan_used = getenv("LLAMA_KEV_KV_SCAN_USED") != nullptr;
+    return scan_used ? cells.used_max_p1() : cells.size();
+}
+
 bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
@@ -402,7 +409,7 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
 
         uint32_t new_head = cells.size();
 
-        for (uint32_t i = 0; i < cells.size(); ++i) {
+        for (uint32_t i = 0, end = kv_scan_end(cells); i < end; ++i) {
             if (!cells.pos_in(i, p0, p1)) {
                 continue;
             }
@@ -426,7 +433,7 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
 
             uint32_t new_head = cells.size();
 
-            for (uint32_t i = 0; i < cells.size(); ++i) {
+            for (uint32_t i = 0, end = kv_scan_end(cells); i < end; ++i) {
                 if (!cells.pos_in(i, p0, p1)) {
                     continue;
                 }
@@ -478,7 +485,7 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
             p1 = std::numeric_limits<llama_pos>::max();
         }
 
-        for (uint32_t i = 0; i < cells.size(); ++i) {
+        for (uint32_t i = 0, end = kv_scan_end(cells); i < end; ++i) {
             if (!cells.pos_in(i, p0, p1)) {
                 continue;
             }
