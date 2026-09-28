@@ -1410,11 +1410,46 @@ bool llama_context::set_adapter_cvec(
     return res;
 }
 
+// LLAMA_KEV_DECODE_TIMING=1: host time of the phases of decode(), averaged and logged every 64 decodes
+namespace {
+struct kev_decode_timing {
+    const bool on = getenv("LLAMA_KEV_DECODE_TIMING") != nullptr;
+    int64_t n_decode = 0, n_ubatch = 0, n_reused = 0;
+    double pre = 0, apply = 0, build = 0, inputs = 0, compute = 0, post = 0, total = 0;
+    void maybe_log() {
+        if (n_decode % 64 != 0) {
+            return;
+        }
+        const double d = (double) n_decode;
+        fprintf(stderr, "KEV_DECODE_TIMING decodes %lld ubatches %lld reused %lld | per decode ms: pre %.2f apply %.2f "
+            "build %.2f inputs %.2f compute %.2f post %.2f total %.2f\n", (long long) n_decode, (long long) n_ubatch,
+            (long long) n_reused, pre/d, apply/d, build/d, inputs/d, compute/d, post/d, total/d);
+    }
+};
+kev_decode_timing & kev_dt() {
+    static kev_decode_timing t;
+    return t;
+}
+double kev_ms_since(int64_t & t_us) {
+    const int64_t now = ggml_time_us();
+    const double ms = (now - t_us) / 1000.0;
+    t_us = now;
+    return ms;
+}
+}
+
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+    auto & kt = kev_dt();
+    int64_t kt_us = ggml_time_us();
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
         return nullptr;
+    }
+
+    if (kt.on) {
+        kt.apply += kev_ms_since(kt_us);
+        ++kt.n_ubatch;
     }
 
     auto * res = get_gf_res_prev();
@@ -1425,6 +1460,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
     if (!graph_reuse_disable && gf_res_prev_active == res && res->can_reuse(gparams)) {
+        kt.n_reused += kt.on ? 1 : 0;
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
@@ -1463,6 +1499,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         gf_res_prev_active = res;
     }
 
+    if (kt.on) {
+        kt.build += kev_ms_since(kt_us);
+    }
+
     // set the input data for the input tensors
     {
         //const auto t_start_us = ggml_time_us();
@@ -1472,8 +1512,14 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
+    if (kt.on) {
+        kt.inputs += kev_ms_since(kt_us);
+    }
 
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    if (kt.on) {
+        kt.compute += kev_ms_since(kt_us);
+    }
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
@@ -1728,6 +1774,23 @@ int llama_context::decode(const llama_batch & batch_inp) {
     // so accept either present rather than requiring exactly one.
     GGML_ASSERT(batch_inp.token || batch_inp.embd);
 
+    // LLAMA_KEV_DECODE_TIMING: whatever the ubatch phases do not cover is "post" (output mapping and copies)
+    struct kev_decode_guard {
+        kev_decode_timing & kt = kev_dt();
+        const int64_t start_us = ggml_time_us();
+        const double sum0 = kt.pre + kt.apply + kt.build + kt.inputs + kt.compute;
+        ~kev_decode_guard() {
+            if (!kt.on) {
+                return;
+            }
+            const double total = (ggml_time_us() - start_us) / 1000.0;
+            kt.total += total;
+            kt.post += total - (kt.pre + kt.apply + kt.build + kt.inputs + kt.compute - sum0);
+            ++kt.n_decode;
+            kt.maybe_log();
+        }
+    } kev_guard;
+
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
         return encode(batch_inp);
@@ -1885,6 +1948,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     int64_t n_outputs_prev = 0;
     int64_t n_tokens_prev  = 0;
+
+    if (kev_guard.kt.on) {
+        kev_guard.kt.pre += (ggml_time_us() - kev_guard.start_us) / 1000.0;
+    }
 
     do {
         const auto & ubatch = mctx->get_ubatch();
