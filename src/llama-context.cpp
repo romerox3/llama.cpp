@@ -1415,15 +1415,15 @@ namespace {
 struct kev_decode_timing {
     const bool on = getenv("LLAMA_KEV_DECODE_TIMING") != nullptr;
     int64_t n_decode = 0, n_ubatch = 0, n_reused = 0;
-    double pre = 0, apply = 0, build = 0, inputs = 0, compute = 0, post = 0, total = 0;
+    double pre = 0, apply = 0, build = 0, alloc = 0, inputs = 0, compute = 0, post = 0, total = 0;
     void maybe_log() {
         if (n_decode % 64 != 0) {
             return;
         }
         const double d = (double) n_decode;
         fprintf(stderr, "KEV_DECODE_TIMING decodes %lld ubatches %lld reused %lld | per decode ms: pre %.2f apply %.2f "
-            "build %.2f inputs %.2f compute %.2f post %.2f total %.2f\n", (long long) n_decode, (long long) n_ubatch,
-            (long long) n_reused, pre/d, apply/d, build/d, inputs/d, compute/d, post/d, total/d);
+            "build %.2f alloc %.2f inputs %.2f compute %.2f post %.2f total %.2f\n", (long long) n_decode, (long long) n_ubatch,
+            (long long) n_reused, pre/d, apply/d, build/d, alloc/d, inputs/d, compute/d, post/d, total/d);
     }
 };
 kev_decode_timing & kev_dt() {
@@ -1481,6 +1481,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //const auto t_start_us = ggml_time_us();
 
         gf = model.build_graph(gparams);
+        if (kt.on) {
+            kt.build += kev_ms_since(kt_us);
+        }
 
         //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
 
@@ -1500,7 +1503,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     if (kt.on) {
-        kt.build += kev_ms_since(kt_us);
+        kt.alloc += kev_ms_since(kt_us); // reuse check, or sched reset and graph allocation
     }
 
     // set the input data for the input tensors
@@ -1778,14 +1781,14 @@ int llama_context::decode(const llama_batch & batch_inp) {
     struct kev_decode_guard {
         kev_decode_timing & kt = kev_dt();
         const int64_t start_us = ggml_time_us();
-        const double sum0 = kt.pre + kt.apply + kt.build + kt.inputs + kt.compute;
+        const double sum0 = kt.pre + kt.apply + kt.build + kt.alloc + kt.inputs + kt.compute;
         ~kev_decode_guard() {
             if (!kt.on) {
                 return;
             }
             const double total = (ggml_time_us() - start_us) / 1000.0;
             kt.total += total;
-            kt.post += total - (kt.pre + kt.apply + kt.build + kt.inputs + kt.compute - sum0);
+            kt.post += total - (kt.pre + kt.apply + kt.build + kt.alloc + kt.inputs + kt.compute - sum0);
             ++kt.n_decode;
             kt.maybe_log();
         }

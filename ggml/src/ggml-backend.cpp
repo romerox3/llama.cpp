@@ -1607,6 +1607,13 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
         }
     }
 
+    // experiment: GGML_SCHED_KEV_REALLOC_LOG=1 counts the graphs that do not fit the reserved buffers
+    static const bool kev_realloc_log = getenv("GGML_SCHED_KEV_REALLOC_LOG") != nullptr;
+    static int64_t kev_n_alloc = 0, kev_n_realloc = 0;
+    static double kev_realloc_ms = 0;
+    const int64_t kev_t0 = ggml_time_us();
+    ++kev_n_alloc;
+
     // allocate graph
     if (backend_ids_changed || !ggml_gallocr_alloc_graph(sched->galloc, &sched->graph)) {
 #ifndef NDEBUG
@@ -1633,6 +1640,12 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
         if (!ggml_gallocr_reserve_n(sched->galloc, &sched->graph, sched->node_backend_ids, sched->leaf_backend_ids)) {
             GGML_LOG_ERROR("%s: failed to reserve graph buffers\n", __func__);
             return false;
+        }
+        if (kev_realloc_log) {
+            ++kev_n_realloc;
+            kev_realloc_ms += (ggml_time_us() - kev_t0) / 1000.0;
+            fprintf(stderr, "GGML_SCHED_KEV_REALLOC allocs %lld reallocs %lld (backend ids changed %d) realloc ms total %.1f\n",
+                (long long) kev_n_alloc, (long long) kev_n_realloc, (int) backend_ids_changed, kev_realloc_ms);
         }
         if (!ggml_gallocr_alloc_graph(sched->galloc, &sched->graph)) {
             GGML_LOG_ERROR("%s: failed to allocate graph\n", __func__);
