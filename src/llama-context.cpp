@@ -240,6 +240,9 @@ llama_context::llama_context(
     // instead of the fused recurrent kernel (sm_70 has no fused chunked kernel)
     cparams.fused_gdn_ch = getenv("LLAMA_KEV_GDN_GRAPH_CHUNK") == nullptr;
     cparams.auto_fgdn    = false;
+    // experiment: LLAMA_KEV_F16_ACT=1 casts a normalized activation that feeds several F16 matmuls
+    // to F16 once, instead of each matmul converting its own copy
+    cparams.kev_f16_act  = getenv("LLAMA_KEV_F16_ACT") != nullptr;
 
     cparams.fused_lid = true;
     cparams.auto_flid = false;

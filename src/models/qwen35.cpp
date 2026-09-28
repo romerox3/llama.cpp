@@ -168,6 +168,17 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
 
+        // the projections of both layer types share this input: convert it to F16 once
+        const auto & layer = model.layers[il];
+        const auto is_f16 = [](const ggml_tensor * w) { return w != nullptr && w->type == GGML_TYPE_F16; };
+        const bool f16_proj = hparams.is_recr(il) ?
+            is_f16(layer.wqkv) && is_f16(layer.wqkv_gate) && is_f16(layer.ssm_beta) && is_f16(layer.ssm_alpha) :
+            is_f16(layer.wq) && is_f16(layer.wk) && is_f16(layer.wv);
+        if (cparams.kev_f16_act && f16_proj) {
+            cur = ggml_cast(ctx0, cur, GGML_TYPE_F16);
+            cb(cur, "attn_norm_f16", il);
+        }
+
         ggml_build_forward_expand(gf, cur);
 
         // Determine layer type and build appropriate attention mechanism
@@ -194,6 +205,11 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
         // Post-attention norm
         ggml_tensor * attn_post_norm = build_norm(cur, model.layers[il].attn_post_norm, nullptr, LLM_NORM_RMS, il);
         cb(attn_post_norm, "attn_post_norm", il);
+        if (cparams.kev_f16_act && model.layers[il].ffn_up->type == GGML_TYPE_F16 &&
+                model.layers[il].ffn_gate->type == GGML_TYPE_F16) {
+            attn_post_norm = ggml_cast(ctx0, attn_post_norm, GGML_TYPE_F16);
+            cb(attn_post_norm, "attn_post_norm_f16", il);
+        }
 
         // Dense FFN layer - without residual connection
         cur = build_layer_ffn(attn_post_norm, il);

@@ -43,6 +43,7 @@ struct llama_cparams {
     bool auto_fa;
     bool fused_gdn_ar;       // use fused gated delta net (autoregressive)
     bool fused_gdn_ch;       // use fused gated delta net (chunked)
+    bool kev_f16_act;        // cast shared matmul inputs to F16 once (qwen35)
     bool auto_fgdn;
     bool fused_lid;          // use fused lightning indexer
     bool auto_flid;
