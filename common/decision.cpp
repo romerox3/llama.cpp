@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <thread>
 
 namespace {
 
@@ -837,6 +838,11 @@ bool batch_attempt(
     const uint32_t n_batch = llama_n_batch(ctx);
     const bool masked = llama_get_embeddings_masked(ctx);
     kev_timing tm;
+    // experiment: KEV_HEAD_THREADS=N computes the pointer head of a round's branches on N threads
+    static const size_t head_threads = [] {
+        const char * e = getenv("KEV_HEAD_THREADS");
+        return e != nullptr && atoi(e) > 1 ? static_cast<size_t>(atoi(e)) : size_t(1);
+    }();
 
     auto cleanup = [&]() {
         // the working sequences go; the reserved cache slots stay as they are
@@ -1044,10 +1050,12 @@ bool batch_attempt(
                 tm.wait += tm.lap();
             }
             ++tm.rounds;
+            // rows first (llama_get_embeddings_ith is not for concurrent use), then the head
+            std::vector<std::vector<const float *>> round_options(count);
+            std::vector<const float *> round_decides(count);
             for (size_t i = 0; i < count; ++i) {
-                batch_item_data & d = data[refs[r + i].item];
+                const batch_item_data & d = data[refs[r + i].item];
                 const size_t b = refs[r + i].branch;
-                std::vector<const float *> options;
                 for (const int32_t position : d.option_ends[b]) {
                     float * embedding = llama_get_embeddings_ith(ctx, static_cast<int32_t>(offsets[i] + position));
                     if (embedding == nullptr) {
@@ -1055,18 +1063,42 @@ bool batch_attempt(
                         cleanup();
                         return fail(err, "decision context was not created with embeddings enabled");
                     }
-                    options.push_back(embedding);
+                    round_options[i].push_back(embedding);
                 }
-                float * decide = llama_get_embeddings_ith(ctx, static_cast<int32_t>(offsets[i] + d.decides[b]));
-                if (decide == nullptr) {
+                round_decides[i] = llama_get_embeddings_ith(ctx, static_cast<int32_t>(offsets[i] + d.decides[b]));
+                if (round_decides[i] == nullptr) {
                     llama_batch_free(batch);
                     cleanup();
                     return fail(err, "decision context was not created with embeddings enabled");
                 }
-                const auto head_start = std::chrono::steady_clock::now();
-                items[d.item].res->probs[b] = common_decision_probabilities(head, decide, options);
-                items[d.item].res->t_head_ms += std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - head_start).count();
+            }
+            // the branches are independent and each one is computed the same way on any thread
+            std::vector<double> round_head_ms(count, 0.0);
+            auto run_heads = [&](size_t first, size_t step) {
+                for (size_t i = first; i < count; i += step) {
+                    const batch_item_data & d = data[refs[r + i].item];
+                    const auto head_start = std::chrono::steady_clock::now();
+                    items[d.item].res->probs[refs[r + i].branch] =
+                        common_decision_probabilities(head, round_decides[i], round_options[i]);
+                    round_head_ms[i] = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - head_start).count();
+                }
+            };
+            const size_t n_head_threads = std::min<size_t>(head_threads, count);
+            if (n_head_threads > 1) {
+                std::vector<std::thread> workers;
+                for (size_t t = 1; t < n_head_threads; ++t) {
+                    workers.emplace_back(run_heads, t, n_head_threads);
+                }
+                run_heads(0, n_head_threads);
+                for (auto & w : workers) {
+                    w.join();
+                }
+            } else {
+                run_heads(0, 1);
+            }
+            for (size_t i = 0; i < count; ++i) {
+                items[data[refs[r + i].item].item].res->t_head_ms += round_head_ms[i];
             }
             llama_batch_free(batch);
             tm.head += tm.lap();
