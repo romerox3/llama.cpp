@@ -679,60 +679,74 @@ bool common_decision_run(
 }
 
 //
+bool common_decision_prepare(
+        const llama_vocab * vocab,
+        const common_decision_head & head,
+        const common_decision_request & req,
+        common_decision_prepared & out,
+        std::string & err) {
+    std::vector<common_decision_encode_question> questions;
+    questions.reserve(req.questions.size());
+    for (const auto & question : req.questions) {
+        questions.push_back({question.instructions, question.options});
+    }
+    common_decision_encoded encoded;
+    if (!common_decision_encode(vocab, head.tok_state, head.tok_question, head.tok_opt_start, head.tok_opt_end,
+            head.tok_decide, req.state, questions, head.max_state, head.max_row, encoded, err)) {
+        return false;
+    }
+    out = common_decision_prepared();
+    out.state_tokens.assign(encoded.ids.begin(), encoded.ids.begin() + encoded.n_state);
+    out.branches.resize(encoded.branch_sizes.size());
+    out.option_ends.resize(encoded.opt_idx.size());
+    out.decides.resize(encoded.decide_idx.size());
+    size_t offset = encoded.n_state;
+    for (size_t k = 0; k < out.branches.size(); ++k) {
+        out.branches[k].assign(encoded.ids.begin() + offset, encoded.ids.begin() + offset + encoded.branch_sizes[k]);
+        for (const int32_t idx : encoded.opt_idx[k]) {
+            out.option_ends[k].push_back(idx - static_cast<int32_t>(offset));
+        }
+        out.decides[k] = encoded.decide_idx[k] - static_cast<int32_t>(offset);
+        offset += encoded.branch_sizes[k];
+    }
+    return true;
+}
+
 // batch run: several requests share the llama_decode calls
 //
 
 namespace {
 
-struct batch_item_data {
+struct batch_item_data : common_decision_prepared {
     size_t item = 0;
-    std::vector<llama_token> state_tokens;
-    std::vector<std::vector<llama_token>> branches;
-    std::vector<std::vector<int32_t>> option_ends;
-    std::vector<int32_t> decides;
     uint32_t state_seq = 0;
     bool cacheable = false;
     bool hit = false;
 };
 
-// encode one request and extract its state and branch rows; false means the
-// request itself is invalid and item.err carries why
+// take the rows of one request (tokenizing it here unless the caller already did) and
+// check them against the context; false means the request itself is invalid and err says why
 bool batch_prepare(
         llama_context * ctx,
         const common_decision_head & head,
         const common_decision_batch_item & item,
         batch_item_data & d,
         std::string & err) {
-    const llama_vocab * vocab = llama_model_get_vocab(llama_get_model(ctx));
-    std::vector<common_decision_encode_question> questions;
-    questions.reserve(item.req->questions.size());
-    for (const auto & question : item.req->questions) {
-        questions.push_back({question.instructions, question.options});
-    }
-    common_decision_encoded encoded;
-    if (!common_decision_encode(vocab, head.tok_state, head.tok_question, head.tok_opt_start, head.tok_opt_end,
-            head.tok_decide, item.req->state, questions, head.max_state, head.max_row, encoded, err)) {
+    if (item.prepared != nullptr) {
+        static_cast<common_decision_prepared &>(d) = std::move(*item.prepared);
+        *item.prepared = common_decision_prepared();
+    } else if (!common_decision_prepare(llama_model_get_vocab(llama_get_model(ctx)), head, *item.req, d, err)) {
         return false;
     }
-    const uint32_t longest = encoded.branch_sizes.empty() ? encoded.n_state :
-        encoded.n_state + *std::max_element(encoded.branch_sizes.begin(), encoded.branch_sizes.end());
+    size_t longest_branch = 0;
+    for (const auto & branch : d.branches) {
+        longest_branch = std::max(longest_branch, branch.size());
+    }
+    const size_t longest = d.state_tokens.size() + longest_branch;
     if (longest > llama_n_ctx_seq(ctx)) {
         err = "state with the longest question branch is " + std::to_string(longest) +
             " tokens but the decision context window is " + std::to_string(llama_n_ctx_seq(ctx)) + " tokens";
         return false;
-    }
-    d.state_tokens.assign(encoded.ids.begin(), encoded.ids.begin() + encoded.n_state);
-    d.branches.resize(encoded.branch_sizes.size());
-    d.option_ends.resize(encoded.opt_idx.size());
-    d.decides.resize(encoded.decide_idx.size());
-    size_t offset = encoded.n_state;
-    for (size_t k = 0; k < d.branches.size(); ++k) {
-        d.branches[k].assign(encoded.ids.begin() + offset, encoded.ids.begin() + offset + encoded.branch_sizes[k]);
-        for (const int32_t idx : encoded.opt_idx[k]) {
-            d.option_ends[k].push_back(idx - static_cast<int32_t>(offset));
-        }
-        d.decides[k] = encoded.decide_idx[k] - static_cast<int32_t>(offset);
-        offset += encoded.branch_sizes[k];
     }
     if (!d.branches.empty() &&
         std::max_element(d.branches.begin(), d.branches.end(),

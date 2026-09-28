@@ -139,10 +139,30 @@ bool common_decision_run(
         std::string & err,
         common_decision_prefix_cache * cache = nullptr);
 
-// one request inside a batch run; the caller owns req and res
+// a request tokenized into its state row and one row per question branch; positions
+// inside a branch are relative to the branch start
+struct common_decision_prepared {
+    std::vector<llama_token> state_tokens;
+    std::vector<std::vector<llama_token>> branches;
+    std::vector<std::vector<int32_t>> option_ends;
+    std::vector<int32_t> decides;
+};
+
+// tokenize a request without touching a context, so callers can do it on their own
+// thread before queueing; false means the request is invalid and err says why
+bool common_decision_prepare(
+        const llama_vocab * vocab,
+        const common_decision_head & head,
+        const common_decision_request & req,
+        common_decision_prepared & out,
+        std::string & err);
+
+// one request inside a batch run; the caller owns req and res. prepared is optional:
+// when set, the batch takes its rows (and empties it) instead of tokenizing req itself
 struct common_decision_batch_item {
     const common_decision_request * req = nullptr;
     common_decision_result * res = nullptr;
+    common_decision_prepared * prepared = nullptr;
     std::string err;
     bool ok = false;
 };

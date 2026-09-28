@@ -130,6 +130,9 @@ bool server_decision::init(const common_params & params, llama_model * model, ll
     SRV_INF("Kev decision context: %u rows x %u tokens%s\n", llama_n_seq_max(ctx), llama_n_ctx_seq(ctx),
         params.kev_unified ? ", unified KV" : "");
 
+    // experiment: KEV_HTTP_PREP=1 moves tokenizing and answer building off the model thread
+    http_prep = getenv("KEV_HTTP_PREP") != nullptr;
+
     // only this thread touches the context and the prefix cache from now on
     owner = std::thread([this] { owner_loop(); });
     return true;
@@ -147,6 +150,13 @@ bool server_decision::parse(const nlohmann::ordered_json & body, common_decision
 bool server_decision::answer(const common_decision_request & req, server_decision_answer & out, std::string & err) {
     auto job = std::make_shared<server_decision_job>();
     job->req = req;
+    if (http_prep) {
+        // tokenizing needs only the vocabulary, not the context: do it on this thread
+        if (!common_decision_prepare(vocab, head, job->req, job->prepared, err)) {
+            return false;
+        }
+        job->prepared_by_caller = true;
+    }
     {
         std::lock_guard<std::mutex> lock(queue_mutex);
         if (stopping) {
@@ -160,8 +170,22 @@ bool server_decision::answer(const common_decision_request & req, server_decisio
         err = std::move(job->err);
         return false;
     }
+    if (job->prepared_by_caller) {
+        job->out = build_answer(job->req, job->result);
+    }
     out = std::move(job->out);
     return true;
+}
+
+server_decision_answer server_decision::build_answer(const common_decision_request & req,
+        const common_decision_result & result) const {
+    server_decision_answer out;
+    out.answers = common_decision_answers(req, result);
+    out.input_tokens = result.n_state_tokens +
+        std::accumulate(result.n_branch_tokens.begin(), result.n_branch_tokens.end(), 0);
+    out.output_tokens = tokenize_count(vocab, kev_json_dumps(out.answers));
+    out.latency_ms = std::round((result.t_state_ms + result.t_branches_ms) * 10.0) / 10.0;
+    return out;
 }
 
 void server_decision::owner_loop() {
@@ -186,6 +210,7 @@ void server_decision::owner_loop() {
         for (size_t i = 0; i < group.size(); ++i) {
             items[i].req = &group[i]->req;
             items[i].res = &results[i];
+            items[i].prepared = group[i]->prepared_by_caller ? &group[i]->prepared : nullptr;
         }
         std::string batch_err;
         common_decision_run_batch(ctx, head, items, batch_err, prefix_cache.get(), pad_branches, pad_states);
@@ -196,12 +221,12 @@ void server_decision::owner_loop() {
                 job->done.set_value(false);
                 continue;
             }
-            const common_decision_result & result = results[i];
-            job->out.answers = common_decision_answers(job->req, result);
-            job->out.input_tokens = result.n_state_tokens +
-                std::accumulate(result.n_branch_tokens.begin(), result.n_branch_tokens.end(), 0);
-            job->out.output_tokens = tokenize_count(vocab, kev_json_dumps(job->out.answers));
-            job->out.latency_ms = std::round((result.t_state_ms + result.t_branches_ms) * 10.0) / 10.0;
+            if (job->prepared_by_caller) {
+                job->result = std::move(results[i]); // the caller thread builds the answer
+            } else {
+                job->out = build_answer(job->req, results[i]);
+            }
+            const common_decision_result & result = job->prepared_by_caller ? job->result : results[i];
             if (prefix_cache) {
                 SRV_INF("systemone: %zu questions, prefix cache %s (entries %u, hits %llu, misses %llu)\n",
                     job->req.questions.size(), result.prefix_cache_hit ? "hit" : "miss",

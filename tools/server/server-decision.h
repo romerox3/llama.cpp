@@ -29,6 +29,11 @@ struct server_decision_job {
     server_decision_answer out;
     std::string err;
     std::promise<bool> done;
+    // KEV_HTTP_PREP=1: the caller thread tokenizes before queueing and builds the answer
+    // after, so the model thread only decodes
+    bool prepared_by_caller = false;
+    common_decision_prepared prepared;
+    common_decision_result result;
 };
 
 struct server_decision {
@@ -60,6 +65,9 @@ private:
     // stop the owner loop, then fail every request still queued
     void stop_owner();
 
+    // answers, token counts and latency of a finished request
+    server_decision_answer build_answer(const common_decision_request & req, const common_decision_result & result) const;
+
     common_decision_head head;
     const llama_vocab * vocab = nullptr;
     bool date_facts = false;
@@ -69,6 +77,7 @@ private:
     uint32_t batch_max = 1;
     bool pad_branches = false;
     bool pad_states = false;
+    bool http_prep = false;
     std::deque<std::shared_ptr<server_decision_job>> queue;
     std::mutex queue_mutex;
     std::condition_variable queue_cv;
